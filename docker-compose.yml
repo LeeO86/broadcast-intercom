@@ -1,0 +1,32 @@
+version: '3'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=3000
+      # Uncomment and set these if you have a Janus server
+      # - JANUS_URL=http://janus:8088/janus
+      # - JANUS_API_SECRET=your_secret_here
+    restart: unless-stopped
+
+  # Uncomment this section if you want to run a Janus WebRTC server
+  # janus:
+  #   image: canyan/janus-gateway:latest
+  #   ports:
+  #     - "8088:8088"
+  #     - "8089:8089"
+  #     - "8889:8889"
+  #     - "8000:8000"
+  #     - "7088:7088"
+  #     - "7089:7089"
+  #   volumes:
+  #     - ./janus/janus.jcfg:/usr/local/etc/janus/janus.jcfg
+  #     - ./janus/janus.plugin.audiobridge.jcfg:/usr/local/etc/janus/janus.plugin.audiobridge.jcfg
+  #   restart: unless-stopped
