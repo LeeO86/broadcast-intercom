@@ -8,7 +8,7 @@ export default defineNuxtConfig({
   ],
   runtimeConfig: {
     // Server-side environment variables
-    janusUrl: process.env.JANUS_URL || 'http://localhost:8088/janus',
+    janusUrl: process.env.JANUS_URL || 'ws://localhost:8188/',
     janusApiSecret: process.env.JANUS_API_SECRET || '',
     // Keys within public are exposed to the client
     public: {

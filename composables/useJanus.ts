@@ -1,7 +1,7 @@
-import { JanusHandle, PeerConnection, GroupSettings, JanusSocketEvents } from '~/types';
+import { JanodeHandle, PeerConnection, GroupSettings, JanusSocketEvents } from '~/types';
 
 export const useJanus = () => {
-  const handles = ref<JanusHandle[]>([]);
+  const handles = ref<JanodeHandle[]>([]);
   const peerConnections = ref<PeerConnection[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);

@@ -1,7 +1,7 @@
 import type { NitroApp } from "nitropack";
 import { Server as Engine } from "engine.io";
 import { Server } from 'socket.io';
-import { SocketEvents } from '~/types';
+import { SocketEvents, JanusSocketEvents } from '~/types';
 import { createLogger } from '~/server/utils/logger';
 import { getHandle } from '~/server/utils/janus';
 import { v4 as uuidv4 } from 'uuid';

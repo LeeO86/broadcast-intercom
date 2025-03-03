@@ -13,6 +13,7 @@
     "@pinia/nuxt": "^0.5.1",
     "@vueuse/core": "^10.9.0",
     "engine.io": "^6.6.4",
+    "janode": "^1.7.1",
     "nuxt": "^3.13.0",
     "pinia": "^2.1.7",
     "pinia-plugin-persistedstate": "^3.2.1",

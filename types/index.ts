@@ -42,7 +42,7 @@ export interface ActivityLogEntry {
 }
 
 // WebRTC and Janus Types
-export interface JanusHandle {
+export interface JanodeHandle {
   handleId: string;
   plugin: string;
   groupId?: number;

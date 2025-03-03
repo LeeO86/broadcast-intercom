@@ -1,54 +1,151 @@
+import Janode from 'janode';
+import Audiobridgeplugin from 'janode/plugins/audiobridge';
 import { createLogger } from './logger';
 
 const logger = createLogger('janus');
 
 // Store for handles and sessions
 const handles = new Map();
-const rooms = new Map();
-let nextHandleId = 1;
+const sessions = new Map();
+let janodeConnection = null;
 
 // Initialize Janus connection
 export async function initJanus() {
   logger.trace('initJanus() called');
-  logger.info('Mock Janus initialized');
-  return true;
+  
+  try {
+    const config = useRuntimeConfig();
+    const janusUrl = config.janusUrl || 'ws://localhost:8188';
+    const janusApiSecret = config.janusApiSecret || '';
+    
+    logger.debug({ janusUrl }, 'Connecting to Janus server');
+    
+    // Initialize Janode connection
+    janodeConnection = await Janode.connect({
+      address: [{
+        url: janusUrl,
+        apisecret: janusApiSecret
+      }],
+      // seconds between retries after a connection setup error
+      retry_time_secs: 10
+    });
+    
+    // Set up event handlers
+    janodeConnection.on('error', (err) => {
+      logger.error({ err }, 'Janus connection error');
+    });
+    
+    janodeConnection.on('close', () => {
+      logger.warn('Janus connection closed');
+    });
+    
+    logger.info('Janus connection established successfully');
+    return true;
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to connect to Janus server');
+    return false;
+  }
 }
 
 // Create a new audiobridge room
 export async function createAudioRoom(roomId, description) {
   logger.trace(`createAudioRoom(${roomId}, "${description}") called`);
   
-  // Store room in our local map for tracking
-  rooms.set(roomId, {
-    id: roomId,
-    description,
-    created: new Date().toISOString()
-  });
-  
-  logger.info({ roomId, description }, 'Created mock audiobridge room');
-  return true;
+  try {
+    if (!janodeConnection) {
+      logger.error('Janus connection not initialized');
+      return false;
+    }
+    
+    // Create a session
+    const session = await janodeConnection.create();
+    
+    // Create an audiobridge handle
+    const handle = await session.attach(Audiobridgeplugin);
+    
+    // Create the room
+    const response = await handle.sendWithTransaction({
+      janus: 'message',
+      body: {
+        request: 'create',
+        room: roomId,
+        description: description,
+        record: false,
+        audiolevel_event: true,
+        audio_active_packets: 10,
+        audio_level_average: 25,
+        secret: `room-${roomId}-secret`,
+      }
+    });
+    
+    // Check response
+    if (response?.plugindata?.data?.audiobridge === 'created') {
+      logger.info({ roomId, description }, 'Audiobridge room created successfully');
+      
+      // Detach handle and destroy session
+      await handle.detach();
+      await session.destroy();
+      
+      return true;
+    } else {
+      logger.error({ response }, 'Failed to create audiobridge room');
+      return false;
+    }
+  } catch (error) {
+    logger.error({ err: error, roomId, description }, 'Error creating audiobridge room');
+    return false;
+  }
 }
 
 // Delete an audiobridge room
 export async function deleteAudioRoom(roomId) {
   logger.trace(`deleteAudioRoom(${roomId}) called`);
   
-  if (!rooms.has(roomId)) {
-    logger.warn({ roomId }, 'Attempted to delete non-existent audiobridge room');
+  try {
+    if (!janodeConnection) {
+      logger.error('Janus connection not initialized');
+      return false;
+    }
+    
+    // Create a session
+    const session = await janodeConnection.create();
+    
+    // Create an audiobridge handle
+    const handle = await session.attach('janus.plugin.audiobridge');
+    
+    // Destroy the room
+    const response = await handle.sendWithTransaction({
+      janus: 'message',
+      body: {
+        request: 'destroy',
+        room: roomId,
+        secret: `room-${roomId}-secret`,
+      }
+    });
+    
+    // Check response
+    if (response?.plugindata?.data?.audiobridge === 'destroyed') {
+      logger.info({ roomId }, 'Audiobridge room destroyed successfully');
+      
+      // Detach handle and destroy session
+      await handle.detach();
+      await session.destroy();
+      
+      return true;
+    } else {
+      logger.error({ response }, 'Failed to destroy audiobridge room');
+      return false;
+    }
+  } catch (error) {
+    logger.error({ err: error, roomId }, 'Error destroying audiobridge room');
     return false;
   }
-  
-  // Remove room from our local map
-  rooms.delete(roomId);
-  
-  logger.info({ roomId }, 'Deleted mock audiobridge room');
-  return true;
 }
 
 // Get or create a handle for a specific plugin
 export async function getHandle(plugin, id) {
   logger.trace(`getHandle("${plugin}", "${id}") called`);
-  const handleId = id || plugin || `handle-${nextHandleId++}`;
+  const handleId = id || plugin;
   
   // Check if handle already exists
   if (handles.has(handleId)) {
@@ -58,149 +155,54 @@ export async function getHandle(plugin, id) {
 
   logger.debug({ handleId, plugin }, 'Creating new handle');
   
-  // Create mock handle
-  const handle = {
-    id: handleId,
-    plugin: plugin,
-    sendWithTransaction: async (message) => {
-      logger.debug({ handleId, messageType: message.janus, bodyRequest: message.body?.request }, 'Sending message to handle');
-      
-      // For audiobridge join, return a mock response
-      if (message.body?.request === 'join') {
-        logger.debug({ room: message.body.room, display: message.body.display }, 'Handling join request');
-        return {
-          plugindata: {
-            plugin: 'janus.plugin.audiobridge',
-            data: {
-              audiobridge: 'joined',
-              room: message.body.room,
-              id: Math.floor(Math.random() * 1000000),
-              participants: []
-            }
-          }
-        };
-      }
-      
-      // For configure with jsep, return a mock jsep response
-      if (message.body?.request === 'configure' && message.jsep) {
-        logger.debug({ muted: message.body.muted, hasJsep: true }, 'Handling configure request with jsep');
-        return {
-          plugindata: {
-            plugin: 'janus.plugin.audiobridge',
-            data: {
-              audiobridge: 'event',
-              configured: 'ok'
-            }
-          },
-          jsep: {
-            type: 'answer',
-            sdp: `v=0
-o=- 1234567890 1 IN IP4 127.0.0.1
-s=Mock SDP
-t=0 0
-a=group:BUNDLE audio
-m=audio 1 UDP/TLS/RTP/SAVPF 111
-c=IN IP4 0.0.0.0
-a=rtpmap:111 opus/48000/2
-a=sendrecv
-a=fingerprint:sha-256 A1:2C:3D:4E:5F:6A:7B:8C:9D:0E:1F:2A:3B:4C:5D:6E:7F:8A:9B:0C:1D:2E:3F:4A:5B:6C:7D:8E:9F:0A:1B:2C
-a=setup:actpass
-a=ice-ufrag:mock1234
-a=ice-pwd:mockpwd1234567890abcdef
-a=mid:audio
-a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
-a=msid-semantic: WMS mockstream
-a=rtcp-mux
-a=rtcp-fb:111 transport-cc
-a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
-a=ssrc:1234567890 cname:mock@example.com
-a=ssrc:1234567890 msid:mockstream mockaudio
-a=ssrc:1234567890 mslabel:mockstream
-a=ssrc:1234567890 label:mockaudio`
-          }
-        };
-      }
-      
-      // For configure without jsep (mute/unmute)
-      if (message.body?.request === 'configure' && !message.jsep) {
-        logger.debug({ muted: message.body.muted }, 'Handling configure request (mute/unmute)');
-        return {
-          plugindata: {
-            plugin: 'janus.plugin.audiobridge',
-            data: {
-              audiobridge: 'event',
-              configured: 'ok',
-              muted: message.body.muted
-            }
-          }
-        };
-      }
-      
-      // For leave request
-      if (message.body?.request === 'leave') {
-        logger.debug('Handling leave request');
-        return {
-          plugindata: {
-            plugin: 'janus.plugin.audiobridge',
-            data: {
-              audiobridge: 'event',
-              leaving: 'ok'
-            }
-          }
-        };
-      }
-      
-      // For destroy request (delete room)
-      if (message.body?.request === 'destroy') {
-        logger.debug({ room: message.body.room }, 'Handling destroy request');
-        
-        // Remove room from our local map
-        if (message.body.room && rooms.has(message.body.room)) {
-          rooms.delete(message.body.room);
-          logger.info({ roomId: message.body.room }, 'Deleted audiobridge room via destroy request');
-        }
-        
-        return {
-          plugindata: {
-            plugin: 'janus.plugin.audiobridge',
-            data: {
-              audiobridge: 'destroyed',
-              room: message.body.room
-            }
-          }
-        };
-      }
-      
-      // Default response
-      logger.debug({ plugin }, 'Sending default response');
-      return {
-        plugindata: {
-          plugin: plugin,
-          data: {
-            status: 'ok'
-          }
-        }
-      };
-    },
-    sendTrickle: async (candidate) => {
-      logger.debug({ handleId, hasCandidate: !!candidate }, 'Sending trickle ICE candidate');
-      return true;
-    },
-    detach: async () => {
-      logger.debug({ handleId }, 'Detaching handle');
-      handles.delete(handleId);
-      return true;
+  try {
+    if (!janodeConnection) {
+      throw new Error('Janus connection not initialized');
     }
-  };
-  
-  handles.set(handleId, handle);
-  logger.info({ handleId, plugin }, 'Created and stored new handle');
-  return handle;
+    
+    // Create a session if needed
+    let session;
+    if (sessions.has(handleId)) {
+      session = sessions.get(handleId);
+    } else {
+      session = await janodeConnection.create();
+      sessions.set(handleId, session);
+      
+      // Set up session event handlers
+      session.on('timeout', () => {
+        logger.warn({ handleId }, 'Session timeout');
+        sessions.delete(handleId);
+      });
+      
+      session.on('destroyed', () => {
+        logger.info({ handleId }, 'Session destroyed');
+        sessions.delete(handleId);
+      });
+    }
+    
+    // Create handle
+    const handle = await session.attach(Audiobridgeplugin);
+    
+    // Store handle
+    handles.set(handleId, handle);
+    
+    // Set up handle event handlers
+    handle.on('detached', () => {
+      logger.info({ handleId }, 'Handle detached');
+      handles.delete(handleId);
+    });
+    
+    return handle;
+  } catch (error) {
+    logger.error({ err: error, handleId, plugin }, 'Error creating handle');
+    throw error;
+  }
 }
 
 // Clear all existing handles
 export async function clearHandles() {
   logger.trace('clearHandles() called');
+  
   for (const [id, handle] of handles.entries()) {
     try {
       await handle.detach();
@@ -211,27 +213,90 @@ export async function clearHandles() {
   }
   
   handles.clear();
-  logger.info('All handles cleared');
+  
+  // Also destroy all sessions
+  for (const [id, session] of sessions.entries()) {
+    try {
+      await session.destroy();
+      logger.debug({ sessionId: id }, 'Destroyed session');
+    } catch (error) {
+      logger.error({ err: error, sessionId: id }, 'Failed to destroy session');
+    }
+  }
+  
+  sessions.clear();
+  
+  logger.info('All handles and sessions cleared');
 }
 
 // Get all rooms (for debugging/admin purposes)
 export async function getAllRooms() {
   logger.trace('getAllRooms() called');
-  return Array.from(rooms.values());
+  
+  try {
+    if (!janodeConnection) {
+      logger.error('Janus connection not initialized');
+      return [];
+    }
+    
+    // Create a session
+    const session = await janodeConnection.create();
+    
+    // Create an audiobridge handle
+    const handle = await session.attach('janus.plugin.audiobridge');
+    
+    // List all rooms
+    const response = await handle.sendWithTransaction({
+      janus: 'message',
+      body: {
+        request: 'list',
+      }
+    });
+    
+    // Check response
+    if (response?.plugindata?.data?.audiobridge === 'success' && 
+        Array.isArray(response?.plugindata?.data?.list)) {
+      const rooms = response.plugindata.data.list.map(room => ({
+        id: room.room,
+        description: room.description || `Room ${room.room}`,
+        created: new Date().toISOString(), // Janus doesn't provide creation time
+        participants: room.num_participants || 0
+      }));
+      
+      // Detach handle and destroy session
+      await handle.detach();
+      await session.destroy();
+      
+      logger.debug(`Retrieved ${rooms.length} audiobridge rooms`);
+      return rooms;
+    } else {
+      logger.error({ response }, 'Failed to list audiobridge rooms');
+      return [];
+    }
+  } catch (error) {
+    logger.error({ err: error }, 'Error listing audiobridge rooms');
+    return [];
+  }
 }
 
 // Destroy Janus session
 export async function destroyJanus() {
   logger.trace('destroyJanus() called');
+  
   try {
-    // Clear all handles
+    // Clear all handles and sessions
     await clearHandles();
-    // Clear all rooms
-    rooms.clear();
-    logger.info('Mock Janus connection destroyed');
+    
+    // Disconnect Janode
+    if (janodeConnection) {
+      await janodeConnection.close();
+      janodeConnection = null;
+    }
+    
+    logger.info('Janus connection destroyed');
     return true;
   } catch (error) {
-    logger.error({ err: error }, 'Failed to destroy mock Janus connection');
+    logger.error({ err: error }, 'Failed to destroy Janus connection');
     return false;
   }
 }
