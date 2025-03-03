@@ -1,12 +1,13 @@
-import Janode from 'janode';
-import Audiobridgeplugin from 'janode/plugins/audiobridge';
 import { createLogger } from './logger';
+import Janode from 'janode';
+import AudioBridgePlugin from 'janode/plugins/audiobridge';
 
 const logger = createLogger('janus');
 
 // Store for handles and sessions
-const handles = new Map();
-const sessions = new Map();
+const clientHandles = new Map(); // Map<clientId, Map<groupId, handle>>
+const rooms = new Map();
+let janodeSession = null;
 let janodeConnection = null;
 
 // Initialize Janus connection
@@ -15,34 +16,88 @@ export async function initJanus() {
   
   try {
     const config = useRuntimeConfig();
-    const janusUrl = config.janusUrl || 'ws://localhost:8188';
+    const janusUrl = config.janusUrl || 'ws://localhost:8188/';
     const janusApiSecret = config.janusApiSecret || '';
     
-    logger.debug({ janusUrl }, 'Connecting to Janus server');
+    logger.info(`Connecting to Janus at ${janusUrl}`);
     
-    // Initialize Janode connection
+    // Close any existing connection
+    if (janodeConnection) {
+      try {
+        await destroyJanus();
+      } catch (err) {
+        logger.warn({ err }, 'Error destroying existing Janus connection');
+      }
+    }
+    
+    // Connect to Janus
     janodeConnection = await Janode.connect({
       address: [{
         url: janusUrl,
         apisecret: janusApiSecret
-      }],
-      // seconds between retries after a connection setup error
-      retry_time_secs: 10
+      }]
     });
     
-    // Set up event handlers
-    janodeConnection.on('error', (err) => {
-      logger.error({ err }, 'Janus connection error');
+    logger.info('Connection with Janus created');
+    
+    // Set up connection event handlers
+    janodeConnection.once(Janode.EVENT.CONNECTION_CLOSED, () => {
+      logger.info('Connection with Janus closed');
+      janodeSession = null;
+      janodeConnection = null;
+      
+      // Schedule reconnection
+      setTimeout(() => {
+        initJanus().catch(err => {
+          logger.error({ err }, 'Failed to reconnect to Janus');
+        });
+      }, 10000); // Retry after 10 seconds
     });
     
-    janodeConnection.on('close', () => {
-      logger.warn('Janus connection closed');
+    janodeConnection.once(Janode.EVENT.CONNECTION_ERROR, ({ message }) => {
+      logger.error({ message }, 'Connection with Janus error');
+      janodeSession = null;
+      janodeConnection = null;
+      
+      // Schedule reconnection
+      setTimeout(() => {
+        initJanus().catch(err => {
+          logger.error({ err }, 'Failed to reconnect to Janus');
+        });
+      }, 10000); // Retry after 10 seconds
     });
     
-    logger.info('Janus connection established successfully');
+    // Create a session
+    janodeSession = await janodeConnection.create();
+    logger.info('Session with Janus created');
+    
+    janodeSession.once(Janode.EVENT.SESSION_DESTROYED, () => {
+      logger.info('Session destroyed');
+      janodeSession = null;
+    });
+    
     return true;
   } catch (error) {
-    logger.error({ err: error }, 'Failed to connect to Janus server');
+    logger.error({ err: error }, 'Janus setup error');
+    
+    if (janodeConnection) {
+      try {
+        await janodeConnection.close();
+      } catch (err) {
+        logger.warn({ err }, 'Error closing Janus connection');
+      }
+      janodeConnection = null;
+    }
+    
+    janodeSession = null;
+    
+    // Schedule reconnection
+    setTimeout(() => {
+      initJanus().catch(err => {
+        logger.error({ err }, 'Failed to reconnect to Janus');
+      });
+    }, 10000); // Retry after 10 seconds
+    
     return false;
   }
 }
@@ -51,48 +106,58 @@ export async function initJanus() {
 export async function createAudioRoom(roomId, description) {
   logger.trace(`createAudioRoom(${roomId}, "${description}") called`);
   
-  try {
-    if (!janodeConnection) {
-      logger.error('Janus connection not initialized');
-      return false;
-    }
+  if (!janodeSession) {
+    logger.warn('No Janus session available, storing room info locally');
     
-    // Create a session
-    const session = await janodeConnection.create();
-    
-    // Create an audiobridge handle
-    const handle = await session.attach(Audiobridgeplugin);
-    
-    // Create the room
-    const response = await handle.sendWithTransaction({
-      janus: 'message',
-      body: {
-        request: 'create',
-        room: roomId,
-        description: description,
-        record: false,
-        audiolevel_event: true,
-        audio_active_packets: 10,
-        audio_level_average: 25,
-        secret: `room-${roomId}-secret`,
-      }
+    // Store room in our local map for tracking
+    rooms.set(roomId, {
+      id: roomId,
+      description,
+      created: new Date().toISOString()
     });
     
-    // Check response
-    if (response?.plugindata?.data?.audiobridge === 'created') {
-      logger.info({ roomId, description }, 'Audiobridge room created successfully');
-      
-      // Detach handle and destroy session
-      await handle.detach();
-      await session.destroy();
-      
-      return true;
-    } else {
-      logger.error({ response }, 'Failed to create audiobridge room');
-      return false;
-    }
+    logger.info({ roomId, description }, 'Stored room info locally');
+    return true;
+  }
+  
+  try {
+    // Create a handle for the audiobridge plugin
+    const handle = await janodeSession.attach(AudioBridgePlugin);
+    logger.debug({ handleId: handle.id }, 'Audiobridge handle attached');
+    
+    // Create the room
+    const response = await handle.create({
+      room: roomId,
+      description,
+      record: false,
+      audiolevel_event: true,
+      audio_level_average: 70,
+      audio_active_packets: 2,
+    });
+    
+    logger.info({ roomId, description, response }, 'Created audiobridge room');
+    
+    // Store room in our local map for tracking
+    rooms.set(roomId, {
+      id: roomId,
+      description,
+      created: new Date().toISOString()
+    });
+    
+    // Detach the handle
+    await handle.detach();
+    
+    return true;
   } catch (error) {
     logger.error({ err: error, roomId, description }, 'Error creating audiobridge room');
+    
+    // Store room locally as fallback
+    rooms.set(roomId, {
+      id: roomId,
+      description,
+      created: new Date().toISOString()
+    });
+    
     return false;
   }
 }
@@ -101,181 +166,410 @@ export async function createAudioRoom(roomId, description) {
 export async function deleteAudioRoom(roomId) {
   logger.trace(`deleteAudioRoom(${roomId}) called`);
   
-  try {
-    if (!janodeConnection) {
-      logger.error('Janus connection not initialized');
+  if (!janodeSession) {
+    logger.warn('No Janus session available, removing room from local storage');
+    
+    if (!rooms.has(roomId)) {
+      logger.warn({ roomId }, 'Attempted to delete non-existent room');
       return false;
     }
     
-    // Create a session
-    const session = await janodeConnection.create();
+    // Remove room from our local map
+    rooms.delete(roomId);
     
-    // Create an audiobridge handle
-    const handle = await session.attach('janus.plugin.audiobridge');
+    logger.info({ roomId }, 'Removed room from local storage');
+    return true;
+  }
+  
+  try {
+    // Create a handle for the audiobridge plugin
+    const handle = await janodeSession.attach(AudioBridgePlugin);
+    logger.debug({ handleId: handle.id }, 'Audiobridge handle attached for room deletion');
     
     // Destroy the room
-    const response = await handle.sendWithTransaction({
-      janus: 'message',
-      body: {
-        request: 'destroy',
-        room: roomId,
-        secret: `room-${roomId}-secret`,
-      }
+    const response = await handle.destroy({
+      room: roomId,
     });
     
-    // Check response
-    if (response?.plugindata?.data?.audiobridge === 'destroyed') {
-      logger.info({ roomId }, 'Audiobridge room destroyed successfully');
-      
-      // Detach handle and destroy session
-      await handle.detach();
-      await session.destroy();
-      
-      return true;
-    } else {
-      logger.error({ response }, 'Failed to destroy audiobridge room');
-      return false;
-    }
+    logger.info({ roomId, response }, 'Deleted audiobridge room');
+    
+    // Remove room from our local map
+    rooms.delete(roomId);
+    
+    // Detach the handle
+    await handle.detach();
+    
+    return true;
   } catch (error) {
-    logger.error({ err: error, roomId }, 'Error destroying audiobridge room');
+    logger.error({ err: error, roomId }, 'Error deleting audiobridge room');
+    
+    // Still remove from local map
+    rooms.delete(roomId);
+    
     return false;
   }
 }
 
-// Get or create a handle for a specific plugin
-export async function getHandle(plugin, id) {
-  logger.trace(`getHandle("${plugin}", "${id}") called`);
-  const handleId = id || plugin;
+// Get or create a handle for a specific client and group
+export async function getClientGroupHandle(clientId, groupId, janusRoomId) {
+  logger.trace(`getClientGroupHandle("${clientId}", ${groupId}, ${janusRoomId}) called`);
   
-  // Check if handle already exists
-  if (handles.has(handleId)) {
-    logger.debug({ handleId }, 'Returning existing handle');
-    return handles.get(handleId);
+  if (!janodeSession) {
+    logger.error('No Janus session available');
+    throw new Error('Janus session not available');
   }
-
-  logger.debug({ handleId, plugin }, 'Creating new handle');
   
   try {
-    if (!janodeConnection) {
-      throw new Error('Janus connection not initialized');
+    // Check if we already have a handle for this client and group
+    if (!clientHandles.has(clientId)) {
+      clientHandles.set(clientId, new Map());
     }
     
-    // Create a session if needed
-    let session;
-    if (sessions.has(handleId)) {
-      session = sessions.get(handleId);
-    } else {
-      session = await janodeConnection.create();
-      sessions.set(handleId, session);
-      
-      // Set up session event handlers
-      session.on('timeout', () => {
-        logger.warn({ handleId }, 'Session timeout');
-        sessions.delete(handleId);
-      });
-      
-      session.on('destroyed', () => {
-        logger.info({ handleId }, 'Session destroyed');
-        sessions.delete(handleId);
-      });
+    const clientGroupHandles = clientHandles.get(clientId);
+    
+    // If we already have a handle for this group, return it
+    if (clientGroupHandles.has(groupId)) {
+      logger.debug({ clientId, groupId, handleId: clientGroupHandles.get(groupId).id }, 'Using existing handle');
+      return clientGroupHandles.get(groupId);
     }
     
-    // Create handle
-    const handle = await session.attach(Audiobridgeplugin);
+    // Create a new handle for the audiobridge plugin
+    const handle = await janodeSession.attach(AudioBridgePlugin);
+    logger.info({ clientId, groupId, handleId: handle.id }, 'Created new handle for client and group');
     
-    // Store handle
-    handles.set(handleId, handle);
-    
-    // Set up handle event handlers
-    handle.on('detached', () => {
-      logger.info({ handleId }, 'Handle detached');
-      handles.delete(handleId);
-    });
+    // Store the handle
+    clientGroupHandles.set(groupId, handle);
     
     return handle;
   } catch (error) {
-    logger.error({ err: error, handleId, plugin }, 'Error creating handle');
+    logger.error({ err: error, clientId, groupId }, 'Error getting handle for client and group');
     throw error;
   }
 }
 
-// Clear all existing handles
-export async function clearHandles() {
-  logger.trace('clearHandles() called');
+// Join a client to an audiobridge room
+export async function joinClientToRoom(clientId, groupId, janusRoomId, displayName, muted = true) {
+  logger.trace(`joinClientToRoom("${clientId}", ${groupId}, ${janusRoomId}, "${displayName}") called`);
   
-  for (const [id, handle] of handles.entries()) {
+  try {
+    // Get or create a handle for this client and group
+    const handle = await getClientGroupHandle(clientId, groupId, janusRoomId);
+    
+    // Join the room
+    const response = await handle.join({
+      room: janusRoomId,
+      display: displayName,
+      muted: muted
+    });
+    
+    logger.info({ clientId, groupId, janusRoomId, displayName, response }, 'Client joined audiobridge room');
+    
+    return { success: true, handleId: handle.id, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId, janusRoomId }, 'Error joining client to audiobridge room');
+    throw error;
+  }
+}
+
+// Configure a client's WebRTC connection
+export async function configureClientWebRTC(clientId, groupId, jsep, muted = false) {
+  logger.trace(`configureClientWebRTC("${clientId}", ${groupId}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Configure the WebRTC connection
+    const response = await handle.configure({
+      muted: muted,
+      jsep: jsep
+    });
+    
+    logger.info({ clientId, groupId, handleId: handle.id, response }, 'Client WebRTC configured');
+    
+    return { success: true, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId }, 'Error configuring client WebRTC');
+    throw error;
+  }
+}
+
+// Set mute state for a client in a group
+export async function setClientMute(clientId, groupId, muted) {
+  logger.trace(`setClientMute("${clientId}", ${groupId}, ${muted}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Configure mute state
+    const response = await handle.configure({
+      muted: muted
+    });
+    
+    logger.info({ clientId, groupId, muted, handleId: handle.id, response }, 'Client mute state changed');
+    
+    return { success: true, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId, muted }, 'Error setting client mute state');
+    throw error;
+  }
+}
+
+// Suspend audio for a client in a group (when speaker is muted)
+export async function suspendClientAudio(clientId, groupId) {
+  logger.trace(`suspendClientAudio("${clientId}", ${groupId}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Suspend audio
+    const response = await handle.configure({
+      muted: true,
+      suspend: true
+    });
+    
+    logger.info({ clientId, groupId, handleId: handle.id, response }, 'Client audio suspended');
+    
+    return { success: true, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId }, 'Error suspending client audio');
+    throw error;
+  }
+}
+
+// Resume audio for a client in a group (when speaker is unmuted)
+export async function resumeClientAudio(clientId, groupId, muted = true) {
+  logger.trace(`resumeClientAudio("${clientId}", ${groupId}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Resume audio
+    const response = await handle.configure({
+      muted: muted,
+      suspend: false
+    });
+    
+    logger.info({ clientId, groupId, handleId: handle.id, response }, 'Client audio resumed');
+    
+    return { success: true, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId }, 'Error resuming client audio');
+    throw error;
+  }
+}
+
+// Process trickle ICE candidate for a client in a group
+export async function processTrickleCandidate(clientId, groupId, candidate) {
+  logger.trace(`processTrickleCandidate("${clientId}", ${groupId}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Process the trickle candidate
+    if (candidate === null) {
+      // This is a trickle complete signal
+      await handle.trickleComplete();
+      logger.debug({ clientId, groupId, handleId: handle.id }, 'Trickle complete');
+    } else {
+      // This is a regular trickle candidate
+      await handle.trickle(candidate);
+      logger.debug({ clientId, groupId, handleId: handle.id }, 'Trickle candidate processed');
+    }
+    
+    return { success: true };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId }, 'Error processing trickle candidate');
+    throw error;
+  }
+}
+
+// Leave a client from an audiobridge room
+export async function leaveClientFromRoom(clientId, groupId) {
+  logger.trace(`leaveClientFromRoom("${clientId}", ${groupId}) called`);
+  
+  try {
+    // Get the handle for this client and group
+    if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
+      logger.warn({ clientId, groupId }, 'No handle found for client and group, nothing to leave');
+      return { success: true };
+    }
+    
+    const handle = clientHandles.get(clientId).get(groupId);
+    
+    // Leave the room
+    const response = await handle.leave();
+    
+    logger.info({ clientId, groupId, handleId: handle.id, response }, 'Client left audiobridge room');
+    
+    // Detach the handle
+    await handle.detach();
+    
+    // Remove the handle from our map
+    clientHandles.get(clientId).delete(groupId);
+    
+    // If this client has no more handles, remove the client entry
+    if (clientHandles.get(clientId).size === 0) {
+      clientHandles.delete(clientId);
+    }
+    
+    return { success: true, data: response };
+  } catch (error) {
+    logger.error({ err: error, clientId, groupId }, 'Error leaving audiobridge room');
+    
+    // Still try to clean up the handle
     try {
+      if (clientHandles.has(clientId) && clientHandles.get(clientId).has(groupId)) {
+        const handle = clientHandles.get(clientId).get(groupId);
+        await handle.detach();
+        clientHandles.get(clientId).delete(groupId);
+        
+        if (clientHandles.get(clientId).size === 0) {
+          clientHandles.delete(clientId);
+        }
+      }
+    } catch (cleanupError) {
+      logger.error({ err: cleanupError, clientId, groupId }, 'Error cleaning up handle after leave failure');
+    }
+    
+    throw error;
+  }
+}
+
+// Clean up all handles for a client
+export async function cleanupClientHandles(clientId) {
+  logger.trace(`cleanupClientHandles("${clientId}") called`);
+  
+  if (!clientHandles.has(clientId)) {
+    logger.debug({ clientId }, 'No handles found for client, nothing to clean up');
+    return { success: true };
+  }
+  
+  const clientGroupHandles = clientHandles.get(clientId);
+  const errors = [];
+  
+  // Leave each room and detach each handle
+  for (const [groupId, handle] of clientGroupHandles.entries()) {
+    try {
+      // Try to leave the room
+      try {
+        await handle.leave();
+        logger.debug({ clientId, groupId, handleId: handle.id }, 'Client left audiobridge room during cleanup');
+      } catch (leaveError) {
+        logger.warn({ err: leaveError, clientId, groupId, handleId: handle.id }, 'Error leaving room during cleanup');
+      }
+      
+      // Detach the handle
       await handle.detach();
-      logger.debug({ handleId: id }, 'Detached handle');
+      logger.debug({ clientId, groupId, handleId: handle.id }, 'Handle detached during cleanup');
     } catch (error) {
-      logger.error({ err: error, handleId: id }, 'Failed to detach handle');
+      logger.error({ err: error, clientId, groupId }, 'Error cleaning up handle');
+      errors.push(error);
     }
   }
   
-  handles.clear();
+  // Remove all handles for this client
+  clientHandles.delete(clientId);
   
-  // Also destroy all sessions
-  for (const [id, session] of sessions.entries()) {
-    try {
-      await session.destroy();
-      logger.debug({ sessionId: id }, 'Destroyed session');
-    } catch (error) {
-      logger.error({ err: error, sessionId: id }, 'Failed to destroy session');
-    }
+  logger.info({ clientId, errorCount: errors.length }, 'Client handles cleaned up');
+  
+  if (errors.length > 0) {
+    return { success: false, errors };
   }
   
-  sessions.clear();
-  
-  logger.info('All handles and sessions cleared');
+  return { success: true };
 }
 
 // Get all rooms (for debugging/admin purposes)
 export async function getAllRooms() {
   logger.trace('getAllRooms() called');
   
+  if (!janodeSession) {
+    logger.warn('No Janus session available, returning locally stored rooms');
+    return Array.from(rooms.values());
+  }
+  
   try {
-    if (!janodeConnection) {
-      logger.error('Janus connection not initialized');
-      return [];
-    }
-    
-    // Create a session
-    const session = await janodeConnection.create();
-    
-    // Create an audiobridge handle
-    const handle = await session.attach('janus.plugin.audiobridge');
+    // Create a handle for the audiobridge plugin
+    const handle = await janodeSession.attach(AudioBridgePlugin);
+    logger.debug({ handleId: handle.id }, 'Audiobridge handle attached for listing rooms');
     
     // List all rooms
-    const response = await handle.sendWithTransaction({
-      janus: 'message',
-      body: {
-        request: 'list',
-      }
-    });
+    const response = await handle.list();
+    logger.debug({ response }, 'Retrieved rooms list from Janus');
     
-    // Check response
-    if (response?.plugindata?.data?.audiobridge === 'success' && 
-        Array.isArray(response?.plugindata?.data?.list)) {
-      const rooms = response.plugindata.data.list.map(room => ({
-        id: room.room,
-        description: room.description || `Room ${room.room}`,
-        created: new Date().toISOString(), // Janus doesn't provide creation time
-        participants: room.num_participants || 0
-      }));
-      
-      // Detach handle and destroy session
-      await handle.detach();
-      await session.destroy();
-      
-      logger.debug(`Retrieved ${rooms.length} audiobridge rooms`);
-      return rooms;
-    } else {
-      logger.error({ response }, 'Failed to list audiobridge rooms');
-      return [];
-    }
+    // Format the response
+    const roomsList = response.list.map(room => ({
+      id: room.room,
+      description: room.description || '',
+      created: new Date().toISOString(), // Janus doesn't provide creation time
+      participants: room.num_participants || 0
+    }));
+    
+    // Detach the handle
+    await handle.detach();
+    
+    return roomsList;
   } catch (error) {
-    logger.error({ err: error }, 'Error listing audiobridge rooms');
-    return [];
+    logger.error({ err: error }, 'Error getting rooms list');
+    
+    // Return locally stored rooms as fallback
+    return Array.from(rooms.values());
+  }
+}
+
+// Get handle for a specific plugin (legacy method, use getClientGroupHandle instead)
+export async function getHandle(plugin, id) {
+  logger.trace(`getHandle("${plugin}", "${id}") called`);
+  logger.warn('Using legacy getHandle method, consider using getClientGroupHandle instead');
+  
+  if (!janodeSession) {
+    logger.error('No Janus session available');
+    throw new Error('Janus session not available');
+  }
+  
+  try {
+    // Determine which plugin to use
+    let pluginToUse;
+    if (plugin === 'janus.plugin.audiobridge' || plugin === 'audiobridge') {
+      pluginToUse = AudioBridgePlugin;
+    } else {
+      // Default to AudioBridgePlugin if not specified
+      pluginToUse = AudioBridgePlugin;
+    }
+    
+    // Create a handle for the specified plugin
+    const handle = await janodeSession.attach(pluginToUse);
+    logger.info({ handleId: handle.id, plugin }, 'Created Janode handle');
+    
+    return handle;
+  } catch (error) {
+    logger.error({ err: error, plugin, id }, 'Error getting handle');
+    throw error;
   }
 }
 
@@ -284,10 +578,23 @@ export async function destroyJanus() {
   logger.trace('destroyJanus() called');
   
   try {
-    // Clear all handles and sessions
-    await clearHandles();
+    // Clean up all client handles
+    const clientIds = Array.from(clientHandles.keys());
+    for (const clientId of clientIds) {
+      try {
+        await cleanupClientHandles(clientId);
+      } catch (error) {
+        logger.error({ err: error, clientId }, 'Error cleaning up client handles during Janus destruction');
+      }
+    }
     
-    // Disconnect Janode
+    // Destroy session if it exists
+    if (janodeSession) {
+      await janodeSession.destroy();
+      janodeSession = null;
+    }
+    
+    // Close connection if it exists
     if (janodeConnection) {
       await janodeConnection.close();
       janodeConnection = null;
@@ -297,6 +604,12 @@ export async function destroyJanus() {
     return true;
   } catch (error) {
     logger.error({ err: error }, 'Failed to destroy Janus connection');
+    
+    // Reset variables even if there was an error
+    janodeSession = null;
+    janodeConnection = null;
+    clientHandles.clear();
+    
     return false;
   }
 }

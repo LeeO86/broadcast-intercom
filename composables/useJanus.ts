@@ -335,6 +335,26 @@ export const useJanus = () => {
     }
   };
 
+  // Mute/unmute speaker for a group
+  const toggleSpeakerMute = async (groupId: number, muted: boolean) => {
+    try {
+      // Find peer connection for this group
+      const peerConnection = peerConnections.value.find(pc => pc.groupId === groupId);
+      
+      if (!peerConnection) {
+        throw new Error(`No peer connection found for group ${groupId}`);
+      }
+
+      // Emit mute toggle event to server
+      socket.value?.emit('mute_toggle', { groupId, muted });
+
+      console.log(`${muted ? 'Muted' : 'Unmuted'} speaker for group ${groupId}`);
+    } catch (err) {
+      console.error(`Failed to toggle speaker mute for group ${groupId}:`, err);
+      throw err;
+    }
+  };
+
   // Leave an audiobridge room
   const leaveAudioRoom = async (groupId: number) => {
     try {
@@ -402,6 +422,7 @@ export const useJanus = () => {
     configureAudioRoom,
     startTalking,
     stopTalking,
+    toggleSpeakerMute,
     leaveAudioRoom,
     cleanup,
   };

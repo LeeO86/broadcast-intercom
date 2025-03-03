@@ -107,6 +107,7 @@ const {
   configureAudioRoom, 
   startTalking: startJanusTalking, 
   stopTalking: stopJanusTalking, 
+  toggleSpeakerMute,
   leaveAudioRoom, 
   cleanup 
 } = useJanus();
@@ -397,7 +398,7 @@ const handleVolumeChange = ({ groupId, volume }: { groupId: number, volume: numb
 };
 
 // Handle mute toggle
-const handleMuteToggle = ({ groupId, muted }: { groupId: number, muted: boolean }) => {
+const handleMuteToggle = async ({ groupId, muted }: { groupId: number, muted: boolean }) => {
   if (muted) {
     mutedGroups.value.add(groupId);
     
@@ -406,6 +407,9 @@ const handleMuteToggle = ({ groupId, muted }: { groupId: number, muted: boolean 
     audioElements.forEach((el: HTMLAudioElement) => {
       el.muted = true;
     });
+    
+    // Suspend audio in Janus
+    await toggleSpeakerMute(groupId, true);
     
     toast.info(`Muted ${production.value?.groups.find(g => g.id === groupId)?.name || 'group'}`);
   } else {
@@ -416,6 +420,9 @@ const handleMuteToggle = ({ groupId, muted }: { groupId: number, muted: boolean 
     audioElements.forEach((el: HTMLAudioElement) => {
       el.muted = false;
     });
+    
+    // Resume audio in Janus
+    await toggleSpeakerMute(groupId, false);
     
     toast.info(`Unmuted ${production.value?.groups.find(g => g.id === groupId)?.name || 'group'}`);
   }

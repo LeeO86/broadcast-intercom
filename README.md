@@ -11,7 +11,7 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
 - **User-friendly Interface**: Clean, responsive UI with dark mode support
 - **Customizable Settings**: Personalize audio processing and interface preferences
 - **Persistent Settings**: User preferences are saved locally
-- **Offline Capability**: Works in demo mode without a server connection
+- **WebRTC Integration**: Uses Janus WebRTC Gateway for audio streaming
 
 ## Technology Stack
 
@@ -19,7 +19,7 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
 - **UI Framework**: Tailwind CSS
 - **State Management**: Pinia with persistence
 - **Real-time Communication**: Socket.IO
-- **WebRTC**: For audio streaming
+- **WebRTC**: Janode library for Janus WebRTC Gateway integration
 - **Database**: SQLite for server-side storage
 - **Backend**: Node.js with Nitro server
 
@@ -28,6 +28,7 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
 ### Prerequisites
 
 - Node.js 18+ and npm
+- Janus WebRTC Gateway server (for production use)
 
 ### Development Setup
 
@@ -60,7 +61,7 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
 
 2. Run the container:
    ```bash
-   docker run -p 3000:3000 -v $(pwd)/data:/app/data broadcast-intercom
+   docker run -p 3000:3000 -v $(pwd)/data:/app/data -e JANUS_URL=ws://your-janus-server:8188/ broadcast-intercom
    ```
 
 3. Access the application at `http://localhost:3000`
@@ -77,6 +78,32 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
    node .output/server/index.mjs
    ```
 
+## Janus WebRTC Gateway Setup
+
+This application requires a Janus WebRTC Gateway server for audio streaming. You can set up Janus in several ways:
+
+### Using Docker
+
+```bash
+docker run --name janus -p 8188:8188 -p 8088:8088 -p 8089:8089 -p 8889:8889 -p 8000:8000 -p 7088:7088 -p 7089:7089 canyan/janus-gateway
+```
+
+### Manual Installation
+
+Follow the [official Janus installation guide](https://janus.conf.meetecho.com/docs/install.html).
+
+### Configuration
+
+Make sure the AudioBridge plugin is enabled in your Janus configuration.
+
+## Environment Variables
+
+The application can be configured using environment variables:
+
+- `JANUS_URL`: URL of the Janus WebRTC server (default: `ws://localhost:8188/`)
+- `JANUS_API_SECRET`: Secret for Janus API (optional)
+- `SOCKET_URL`: Custom Socket.IO server URL (optional, defaults to same host)
+
 ## Project Structure
 
 - `components/`: Vue components
@@ -92,14 +119,6 @@ A professional-grade intercom system for broadcast productions built with Nuxt 3
   - `utils/`: Utility functions
 - `stores/`: Pinia stores
 - `types/`: TypeScript type definitions
-
-## Configuration
-
-The application can be configured using environment variables:
-
-- `JANUS_URL`: URL of the Janus WebRTC server (default: `http://localhost:8088/janus`)
-- `JANUS_API_SECRET`: Secret for Janus API (optional)
-- `SOCKET_URL`: Custom Socket.IO server URL (optional, defaults to same host)
 
 ## Usage
 
@@ -136,3 +155,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [Tailwind CSS](https://tailwindcss.com/)
 - [Socket.IO](https://socket.io/)
 - [Janus WebRTC Server](https://janus.conf.meetecho.com/)
+- [Janode](https://github.com/meetecho/janode) - Janus API client for Node.js

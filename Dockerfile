@@ -20,6 +20,7 @@ EXPOSE 3000
 ENV HOST=0.0.0.0
 ENV PORT=3000
 ENV NODE_ENV=production
+ENV JANUS_URL=ws://localhost:8188/
 
 # Create data directory for SQLite database
 RUN mkdir -p /app/data && \
