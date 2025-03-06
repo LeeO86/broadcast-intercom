@@ -7,8 +7,21 @@ const logger = createLogger('janus');
 // Store for handles and sessions
 const clientHandles = new Map(); // Map<clientId, Map<groupId, handle>>
 const rooms = new Map();
-let janodeSession = null;
-let janodeConnection = null;
+interface JanodeSession {
+  id?: string;
+  attach<T>(plugin: any): Promise<T>;
+  destroy(): Promise<any>;
+  once(event: string, listener: (...args: any[]) => void): void;
+}
+
+let janodeSession: JanodeSession | null = null;
+interface JanodeConnection {
+  once(event: string, listener: (...args: any[]) => void): void;
+  create(): Promise<JanodeSession>;
+  close(): Promise<any>;
+}
+
+let janodeConnection: JanodeConnection | null = null;
 
 // Initialize Janus connection
 export async function initJanus() {
@@ -103,7 +116,7 @@ export async function initJanus() {
 }
 
 // Create a new audiobridge room
-export async function createAudioRoom(roomId, description) {
+export async function createAudioRoom(roomId: number, description: string) {
   logger.trace(`createAudioRoom(${roomId}, "${description}") called`);
   
   if (!janodeSession) {
@@ -210,8 +223,21 @@ export async function deleteAudioRoom(roomId) {
   }
 }
 
+function mapToObject(map: Map<any, any>): object {
+  const obj: { [key: string]: any } = {};
+  for (const [key, value] of map) {
+    if (value instanceof Map) {
+      // If the value is a Map, recursively convert it to an object
+      obj[key] = mapToObject(value);
+    } else {
+      obj[key] = value;
+    }
+  }
+  return obj;
+}
+
 // Get or create a handle for a specific client and group
-export async function getClientGroupHandle(clientId, groupId, janusRoomId) {
+export async function getClientGroupHandle(clientId: string, groupId: number, janusRoomId: number) {
   logger.trace(`getClientGroupHandle("${clientId}", ${groupId}, ${janusRoomId}) called`);
   
   if (!janodeSession) {
@@ -224,7 +250,7 @@ export async function getClientGroupHandle(clientId, groupId, janusRoomId) {
     if (!clientHandles.has(clientId)) {
       clientHandles.set(clientId, new Map());
     }
-    
+    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId }, 'getClientGroupHandle(): List all Handles');
     const clientGroupHandles = clientHandles.get(clientId);
     
     // If we already have a handle for this group, return it
@@ -248,7 +274,7 @@ export async function getClientGroupHandle(clientId, groupId, janusRoomId) {
 }
 
 // Join a client to an audiobridge room
-export async function joinClientToRoom(clientId, groupId, janusRoomId, displayName, muted = true) {
+export async function joinClientToRoom(clientId: string, groupId: number, janusRoomId: number, displayName: string, muted = true) {
   logger.trace(`joinClientToRoom("${clientId}", ${groupId}, ${janusRoomId}, "${displayName}") called`);
   
   try {
@@ -261,7 +287,7 @@ export async function joinClientToRoom(clientId, groupId, janusRoomId, displayNa
       display: displayName,
       muted: muted
     });
-    
+    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId, handleId: handle.id }, 'joinClientToRoom(): List all Handles');
     logger.info({ clientId, groupId, janusRoomId, displayName, response }, 'Client joined audiobridge room');
     
     return { success: true, handleId: handle.id, data: response };
@@ -282,7 +308,7 @@ export async function configureClientWebRTC(clientId, groupId, jsep, muted = fal
     }
     
     const handle = clientHandles.get(clientId).get(groupId);
-    
+    logger.trace({ mapToObject: mapToObject(clientHandles), clientId, groupId, handleId: handle.id }, 'configureClientWebRTC(): List all Handles');
     // Configure the WebRTC connection
     const response = await handle.configure({
       muted: muted,
@@ -299,7 +325,7 @@ export async function configureClientWebRTC(clientId, groupId, jsep, muted = fal
 }
 
 // Set mute state for a client in a group
-export async function setClientMute(clientId, groupId, muted) {
+export async function setClientMute(clientId: string, groupId: number, muted: boolean) {
   logger.trace(`setClientMute("${clientId}", ${groupId}, ${muted}) called`);
   
   try {
@@ -307,8 +333,10 @@ export async function setClientMute(clientId, groupId, muted) {
     if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
       throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
     }
-    
+    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId }, 'setClientMute(): List all Handles');
     const handle = clientHandles.get(clientId).get(groupId);
+
+    logger.trace({ clientId, groupId, handleId: handle.id }, 'setClientMute(): Chosen Handle');
     
     // Configure mute state
     const response = await handle.configure({
@@ -325,7 +353,7 @@ export async function setClientMute(clientId, groupId, muted) {
 }
 
 // Suspend audio for a client in a group (when speaker is muted)
-export async function suspendClientAudio(clientId, groupId) {
+export async function suspendClientAudio(clientId: string, groupId: number) {
   logger.trace(`suspendClientAudio("${clientId}", ${groupId}) called`);
   
   try {
@@ -352,7 +380,7 @@ export async function suspendClientAudio(clientId, groupId) {
 }
 
 // Resume audio for a client in a group (when speaker is unmuted)
-export async function resumeClientAudio(clientId, groupId, muted = true) {
+export async function resumeClientAudio(clientId: string, groupId: number, muted = true) {
   logger.trace(`resumeClientAudio("${clientId}", ${groupId}) called`);
   
   try {
@@ -379,7 +407,7 @@ export async function resumeClientAudio(clientId, groupId, muted = true) {
 }
 
 // Process trickle ICE candidate for a client in a group
-export async function processTrickleCandidate(clientId, groupId, candidate) {
+export async function processTrickleCandidate(clientId: string, groupId: number, candidate: any | null) {
   logger.trace(`processTrickleCandidate("${clientId}", ${groupId}) called`);
   
   try {
@@ -409,7 +437,7 @@ export async function processTrickleCandidate(clientId, groupId, candidate) {
 }
 
 // Leave a client from an audiobridge room
-export async function leaveClientFromRoom(clientId, groupId) {
+export async function leaveClientFromRoom(clientId: string, groupId: number) {
   logger.trace(`leaveClientFromRoom("${clientId}", ${groupId}) called`);
   
   try {
@@ -461,7 +489,7 @@ export async function leaveClientFromRoom(clientId, groupId) {
 }
 
 // Clean up all handles for a client
-export async function cleanupClientHandles(clientId) {
+export async function cleanupClientHandles(clientId: string) {
   logger.trace(`cleanupClientHandles("${clientId}") called`);
   
   if (!clientHandles.has(clientId)) {
@@ -515,7 +543,7 @@ export async function getAllRooms() {
   
   try {
     // Create a handle for the audiobridge plugin
-    const handle = await janodeSession.attach(AudioBridgePlugin);
+    const handle = await janodeSession.attach<JanusPluginHandle>(AudioBridgePlugin);
     logger.debug({ handleId: handle.id }, 'Audiobridge handle attached for listing rooms');
     
     // List all rooms
@@ -543,7 +571,21 @@ export async function getAllRooms() {
 }
 
 // Get handle for a specific plugin (legacy method, use getClientGroupHandle instead)
-export async function getHandle(plugin, id) {
+// Interface for Janus plugin handle
+interface JanusPluginHandle {
+  id: string;
+  detach(): Promise<any>;
+  leave?(): Promise<any>;
+  join?(options: any): Promise<any>;
+  configure?(options: any): Promise<any>;
+  trickle?(candidate: any): Promise<any>;
+  trickleComplete?(): Promise<any>;
+  create?(options: any): Promise<any>;
+  destroy?(options: any): Promise<any>;
+  list?(): Promise<any>;
+}
+
+export async function getHandle(plugin: string, id: string): Promise<JanusPluginHandle> {
   logger.trace(`getHandle("${plugin}", "${id}") called`);
   logger.warn('Using legacy getHandle method, consider using getClientGroupHandle instead');
   
@@ -563,7 +605,7 @@ export async function getHandle(plugin, id) {
     }
     
     // Create a handle for the specified plugin
-    const handle = await janodeSession.attach(pluginToUse);
+    const handle = await janodeSession.attach<JanusPluginHandle>(pluginToUse);
     logger.info({ handleId: handle.id, plugin }, 'Created Janode handle');
     
     return handle;

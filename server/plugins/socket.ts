@@ -39,6 +39,9 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
   
   // Store muted groups for each client
   const clientMutedGroups = new Map<string, Set<number>>();
+  
+  // Store handle IDs to group IDs mapping for each user
+  const userHandleGroups = new Map<string, Map<string, number>>();
 
   io.on('connection', (socket) => {
     logger.info({ socketId: socket.id }, 'Socket connected');
@@ -464,6 +467,12 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
         // Get or create a handle for this client and group
         const handle = await getClientGroupHandle(user.id, groupId, janusRoomId);
         
+        // Store the handle ID to group ID mapping for this user
+        if (!userHandleGroups.has(user.id)) {
+          userHandleGroups.set(user.id, new Map());
+        }
+        userHandleGroups.get(user.id)?.set(handle.id, groupId);
+        
         socket.emit(JanusSocketEvents.HANDLE_CREATED, { 
           success: true, 
           handleId: handle.id 
@@ -500,9 +509,22 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
           return;
         }
         
-        // Extract the request type and group ID
+        // Get the group ID for this handle
+        const groupId = userHandleGroups.get(user.id)?.get(handleId) || 0;
+        if (groupId === 0 && message.body?.room) {
+          // If we don't have a mapping but the message contains a room ID, use that
+          const roomId = parseInt(message.body.room);
+          if (!isNaN(roomId) && roomId > 0) {
+            // Store the mapping for future use
+            if (!userHandleGroups.has(user.id)) {
+              userHandleGroups.set(user.id, new Map());
+            }
+            userHandleGroups.get(user.id)?.set(handleId, roomId);
+          }
+        }
+        
+        // Extract the request type
         const requestType = message.body?.request;
-        const groupId = message.body?.room ? parseInt(message.body.room) : 0;
         
         let response;
         
@@ -577,15 +599,8 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
           return;
         }
         
-        // Find the group ID for this handle
-        let groupId = 0;
-        for (const [gid, handle] of clientHandles.get(user.id)?.entries() || []) {
-          if (handle.id === handleId) {
-            groupId = gid;
-            break;
-          }
-        }
-        
+        // Get the group ID for this handle
+        const groupId = userHandleGroups.get(user.id)?.get(handleId) || 0;
         if (groupId === 0) {
           socket.emit(JanusSocketEvents.ERROR, { error: 'Handle not found for this user' });
           return;
@@ -636,7 +651,7 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
       }
       
       // Check if user was a publisher in any group
-       for (const [groupId, publisher] of groupPublishers.entries()) {
+      for (const [groupId, publisher] of groupPublishers.entries()) {
         if (publisher.socketId === socket.id) {
           // Remove publisher
           groupPublishers.delete(groupId);
@@ -669,6 +684,9 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
       
       // Clean up muted groups
       clientMutedGroups.delete(user.id);
+      
+      // Clean up handle to group mappings
+      userHandleGroups.delete(user.id);
       
       logger.info({ socketId: socket.id, userId: user.id }, 'User fully disconnected');
     });
