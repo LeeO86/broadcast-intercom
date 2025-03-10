@@ -6,6 +6,7 @@ export const useUserSettings = () => {
     displayName: '',
     theme: 'system',
     preferredAudioDevice: '',
+    preferredSpeakerDevice: '',
     groupVolumes: {},
     audioSettings: {
       noiseSuppression: true,
@@ -73,6 +74,11 @@ export const useUserSettings = () => {
     updateSettings({ preferredAudioDevice: deviceId });
   };
 
+  // Set preferred speaker device
+  const setSpeakerDevice = (deviceId: string) => {
+    updateSettings({ preferredSpeakerDevice: deviceId });
+  };
+
   // Set audio settings
   const setAudioSettings = (audioSettings: {
     noiseSuppression?: boolean;
@@ -112,6 +118,7 @@ export const useUserSettings = () => {
     setDisplayName,
     setTheme,
     setAudioDevice,
+    setSpeakerDevice,
     setAudioSettings,
     setGroupVolume,
     getGroupVolume,

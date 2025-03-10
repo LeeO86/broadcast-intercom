@@ -52,7 +52,7 @@
           @mouseleave="isLocked ? null : stopTalking()"
           @touchstart.prevent="isLocked ? toggleTalking() : startTalking()"
           @touchend.prevent="isLocked ? null : stopTalking()"
-          :disabled="otherTalking || isMuted"
+          :disabled="isMuted"
         >
           <span v-if="isTalking" class="text-sm font-medium">LIVE</span>
           <span v-else class="text-sm font-medium">TALK</span>
@@ -217,7 +217,7 @@ const buttonClass = computed(() => {
 
 // Start talking (for mousedown/touchstart in unlocked mode)
 const startTalking = () => {
-  if (props.otherTalking || isMuted.value) return;
+  if (isMuted.value) return;
   
   isTalking.value = true;
   emit('talking-start', props.groupId);
@@ -233,7 +233,7 @@ const stopTalking = () => {
 
 // Toggle talking (for locked mode)
 const toggleTalking = () => {
-  if (props.otherTalking || isMuted.value) return;
+  if (isMuted.value) return;
   
   if (isTalking.value) {
     isTalking.value = false;

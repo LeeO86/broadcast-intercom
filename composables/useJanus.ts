@@ -1,11 +1,32 @@
-import { JanodeHandle, PeerConnection, GroupSettings, JanusSocketEvents } from '~/types';
+import type { JanodeHandle, PeerConnection, GroupSettings, JanusSocketEvents } from '~/types';
 
 export const useJanus = () => {
   const handles = ref<JanodeHandle[]>([]);
   const peerConnections = ref<PeerConnection[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const socket = useSocket().socket;
+  
+  // Hinzufügen: Map für Fehler pro Gruppe
+  const groupErrors = ref<Map<number, string>>(new Map());
+
+  const { 
+    createJanusHandle, 
+    sendJanusMessage, 
+    sendJanusTrickle, 
+    toggleMute 
+  } = useSocket();
+  const { selectedSpeaker } = useAudio();
+
+  // Hilfsmethode zum Setzen von Gruppenfehlern
+  const setGroupError = (groupId: number, errorMessage: string) => {
+    console.error(`Group ${groupId} error: ${errorMessage}`);
+    groupErrors.value.set(groupId, errorMessage);
+  };
+
+  // Hilfsmethode zum Löschen von Gruppenfehlern
+  const clearGroupError = (groupId: number) => {
+    groupErrors.value.delete(groupId);
+  };
 
   // Create a new Janus handle
   const createHandle = async (plugin: string, id?: string): Promise<string> => {
@@ -13,41 +34,20 @@ export const useJanus = () => {
     error.value = null;
 
     try {
-      // Check if we have a socket connection
-      if (!socket.value) {
-        throw new Error('Socket connection not available');
-      }
-
-      return new Promise((resolve, reject) => {
-        // Set up one-time listener for the response
-        socket.value?.once(JanusSocketEvents.HANDLE_CREATED, (response) => {
-          if (response.success) {
-            const handleId = response.handleId;
-            
-            // Store handle
-            handles.value.push({
-              handleId,
-              plugin,
-            });
-            
-            resolve(handleId);
-          } else {
-            reject(new Error(response.error || 'Failed to create Janus handle'));
-          }
-        });
-        
-        // Set up one-time error listener
-        socket.value?.once(JanusSocketEvents.ERROR, (response) => {
-          reject(new Error(response.error || 'Failed to create Janus handle'));
-        });
-        
-        // Send the request
-        socket.value?.emit(JanusSocketEvents.CREATE_HANDLE, { plugin, id });
+      // Use wrapper function instead of direct socket.value
+      const handleId = await createJanusHandle(plugin, id);
+      
+      // Store handle
+      handles.value.push({
+        handleId,
+        plugin,
       });
-    } catch (err: any) {
-      error.value = err.message || 'Failed to create Janus handle';
-      console.error('Error creating Janus handle:', err);
-      throw err;
+      
+      return handleId;
+    } catch (error: any) {
+      error.value = error.message || 'Failed to create Janus handle';
+      console.error('Error creating Janus handle:', error);
+      throw error;
     } finally {
       loading.value = false;
     }
@@ -59,33 +59,12 @@ export const useJanus = () => {
     error.value = null;
 
     try {
-      // Check if we have a socket connection
-      if (!socket.value) {
-        throw new Error('Socket connection not available');
-      }
-
-      return new Promise((resolve, reject) => {
-        // Set up one-time listener for the response
-        socket.value?.once(JanusSocketEvents.MESSAGE_RESPONSE, (response) => {
-          if (response.success) {
-            resolve(response.data);
-          } else {
-            reject(new Error(response.error || 'Failed to send Janus message'));
-          }
-        });
-        
-        // Set up one-time error listener
-        socket.value?.once(JanusSocketEvents.ERROR, (response) => {
-          reject(new Error(response.error || 'Failed to send Janus message'));
-        });
-        
-        // Send the request
-        socket.value?.emit(JanusSocketEvents.SEND_MESSAGE, { handleId, message });
-      });
-    } catch (err: any) {
-      error.value = err.message || 'Failed to send Janus message';
-      console.error('Error sending Janus message:', err);
-      throw err;
+      // Use wrapper function instead of direct socket.value
+      return await sendJanusMessage(handleId, message);
+    } catch (error: any) {
+      error.value = error.message || 'Failed to send Janus message';
+      console.error('Error sending Janus message:', error);
+      throw error;
     } finally {
       loading.value = false;
     }
@@ -94,31 +73,10 @@ export const useJanus = () => {
   // Send trickle ICE candidates to a Janus handle
   const sendTrickle = async (handleId: string, candidate: RTCIceCandidate | null) => {
     try {
-      // Check if we have a socket connection
-      if (!socket.value) {
-        throw new Error('Socket connection not available');
-      }
-
-      return new Promise<void>((resolve, reject) => {
-        // Set up one-time listener for the response
-        socket.value?.once(JanusSocketEvents.TRICKLE_RESPONSE, (response) => {
-          if (response.success) {
-            resolve();
-          } else {
-            reject(new Error(response.error || 'Failed to send trickle ICE candidate'));
-          }
-        });
-        
-        // Set up one-time error listener
-        socket.value?.once(JanusSocketEvents.ERROR, (response) => {
-          reject(new Error(response.error || 'Failed to send trickle ICE candidate'));
-        });
-        
-        // Send the request
-        socket.value?.emit(JanusSocketEvents.SEND_TRICKLE, { handleId, candidate });
-      });
-    } catch (err) {
-      console.error('Failed to send trickle ICE candidate:', err);
+      // Use wrapper function instead of direct socket.value
+      await sendJanusTrickle(handleId, candidate);
+    } catch (error) {
+      console.error('Failed to send trickle ICE candidate:', error);
     }
   };
 
@@ -142,11 +100,29 @@ export const useJanus = () => {
         handles.value[handleIndex].groupId = groupId;
       }
 
+      // Create audio element for this peer connection
+      const audioElement = document.createElement('audio');
+      audioElement.autoplay = true;
+      audioElement.setAttribute('data-group-id', groupId.toString());
+      
+      // Set the audio output device if available
+      if (selectedSpeaker.value && (audioElement as any).setSinkId) {
+        try {
+          await (audioElement as any).setSinkId(selectedSpeaker.value);
+        } catch (err) {
+          console.warn('Failed to set audio output device:', err);
+        }
+      }
+      
+      // Add audio element to the document
+      document.body.appendChild(audioElement);
+
       // Create PeerConnection object
       const peerConnection: PeerConnection = {
         pc,
         groupId,
         handleId,
+        audioElement
       };
 
       // Add to list of peer connections
@@ -168,18 +144,26 @@ export const useJanus = () => {
         
         // Store the stream with the peer connection
         peerConnection.stream = event.streams[0];
+        
+        // Connect the stream to the audio element
+        if (audioElement) {
+          audioElement.srcObject = event.streams[0];
+        }
       };
 
       return peerConnection;
-    } catch (err) {
-      console.error(`Failed to create peer connection for group ${groupId}:`, err);
-      throw err;
+    } catch (error) {
+      console.error(`Failed to create peer connection for group ${groupId}:`, error);
+      throw error;
     }
   };
 
   // Join an audiobridge room
   const joinAudioRoom = async (groupId: number, displayName: string, muted: boolean = true) => {
     try {
+      // Löschen eines vorherigen Fehlers für diese Gruppe
+      clearGroupError(groupId);
+      
       // Find or create peer connection for this group
       let peerConnection = peerConnections.value.find(pc => pc.groupId === groupId);
       
@@ -190,9 +174,15 @@ export const useJanus = () => {
       // Get the group from the database to get the Janus room ID
       const response = await $fetch(`/api/groups/${groupId}`);
       if (!response.success) {
-        throw new Error(response.error || 'Failed to get group information');
+        const errText = 'error' in response ? String(response.error) : 'Failed to get group information';
+        throw new Error(errText);
       }
 
+      // Type guard to ensure data exists after success check
+      if (!('data' in response)) {
+        throw new Error('Group data not found in response');
+      }
+      
       const group = response.data;
       const janusRoomId = group.janus_room_id;
 
@@ -210,9 +200,11 @@ export const useJanus = () => {
       console.log(`Joined audiobridge room ${janusRoomId} for group ${groupId}`);
       
       return peerConnection;
-    } catch (err) {
-      console.error(`Failed to join audiobridge room for group ${groupId}:`, err);
-      throw err;
+    } catch (error: any) {
+      // Fehler für diese spezifische Gruppe setzen
+      setGroupError(groupId, error.message || 'Failed to join audio room');
+      console.error(`Failed to join audiobridge room for group ${groupId}:`, error);
+      throw error;
     }
   };
 
@@ -220,9 +212,12 @@ export const useJanus = () => {
   const configureAudioRoom = async (
     groupId: number, 
     audioStream?: MediaStream,
-    audioConstraints?: MediaTrackConstraints
+    audioConstraints?: MediaTrackConstraints,
+    muted: boolean = true
   ) => {
     try {
+      clearGroupError(groupId);
+      
       // Find peer connection for this group
       const peerConnection = peerConnections.value.find(pc => pc.groupId === groupId);
       
@@ -264,7 +259,7 @@ export const useJanus = () => {
         janus: 'message',
         body: {
           request: 'configure',
-          muted: audioStream ? false : true,
+          muted,
         },
         jsep: offer,
       });
@@ -277,15 +272,17 @@ export const useJanus = () => {
       console.log(`Configured WebRTC for group ${groupId}`);
       
       return peerConnection;
-    } catch (err) {
-      console.error(`Failed to configure WebRTC for group ${groupId}:`, err);
-      throw err;
+    } catch (error: any) {
+      setGroupError(groupId, error.message || 'Failed to configure audio room');
+      console.error(`Failed to configure WebRTC for group ${groupId}:`, error);
+      throw error;
     }
   };
 
   // Start talking in a group
   const startTalking = async (groupId: number) => {
     try {
+      clearGroupError(groupId);
       // Find peer connection for this group
       const peerConnection = peerConnections.value.find(pc => pc.groupId === groupId);
       
@@ -303,15 +300,17 @@ export const useJanus = () => {
       });
 
       console.log(`Started talking in group ${groupId}`);
-    } catch (err) {
-      console.error(`Failed to start talking in group ${groupId}:`, err);
-      throw err;
+    } catch (error: any) {
+      setGroupError(groupId, error.message || 'Failed to start talking');
+      console.error(`Failed to start talking in group ${groupId}:`, error);
+      throw error;
     }
   };
 
   // Stop talking in a group
   const stopTalking = async (groupId: number) => {
     try {
+      clearGroupError(groupId);
       // Find peer connection for this group
       const peerConnection = peerConnections.value.find(pc => pc.groupId === groupId);
       
@@ -329,9 +328,10 @@ export const useJanus = () => {
       });
 
       console.log(`Stopped talking in group ${groupId}`);
-    } catch (err) {
-      console.error(`Failed to stop talking in group ${groupId}:`, err);
-      throw err;
+    } catch (error: any) {
+      setGroupError(groupId, error.message || 'Failed to stop talking');
+      console.error(`Failed to stop talking in group ${groupId}:`, error);
+      throw error;
     }
   };
 
@@ -345,13 +345,18 @@ export const useJanus = () => {
         throw new Error(`No peer connection found for group ${groupId}`);
       }
 
-      // Emit mute toggle event to server
-      socket.value?.emit('mute_toggle', { groupId, muted });
+      // Use wrapper function instead of direct socket.value
+      toggleMute(groupId, muted);
+
+      // Mute/unmute the audio element
+      if (peerConnection.audioElement) {
+        peerConnection.audioElement.muted = muted;
+      }
 
       console.log(`${muted ? 'Muted' : 'Unmuted'} speaker for group ${groupId}`);
-    } catch (err) {
-      console.error(`Failed to toggle speaker mute for group ${groupId}:`, err);
-      throw err;
+    } catch (error) {
+      console.error(`Failed to toggle speaker mute for group ${groupId}:`, error);
+      throw error;
     }
   };
 
@@ -376,6 +381,11 @@ export const useJanus = () => {
       // Close peer connection
       peerConnection.pc.close();
 
+      // Remove audio element
+      if (peerConnection.audioElement) {
+        peerConnection.audioElement.remove();
+      }
+
       // Remove peer connection from list
       peerConnections.value = peerConnections.value.filter(pc => pc.groupId !== groupId);
 
@@ -383,9 +393,9 @@ export const useJanus = () => {
       handles.value = handles.value.filter(h => h.handleId !== peerConnection.handleId);
 
       console.log(`Left audiobridge room for group ${groupId}`);
-    } catch (err) {
-      console.error(`Failed to leave audiobridge room for group ${groupId}:`, err);
-      throw err;
+    } catch (error) {
+      console.error(`Failed to leave audiobridge room for group ${groupId}:`, error);
+      throw error;
     }
   };
 
@@ -396,16 +406,23 @@ export const useJanus = () => {
       for (const pc of [...peerConnections.value]) {
         try {
           await leaveAudioRoom(pc.groupId);
-        } catch (err) {
-          console.error(`Failed to leave audiobridge room for group ${pc.groupId}:`, err);
+        } catch (error) {
+          console.error(`Failed to leave audiobridge room for group ${pc.groupId}:`, error);
         }
       }
+
+      // Remove all audio elements
+      peerConnections.value.forEach(pc => {
+        if (pc.audioElement) {
+          pc.audioElement.remove();
+        }
+      });
 
       // Clear lists
       peerConnections.value = [];
       handles.value = [];
-    } catch (err) {
-      console.error('Failed to clean up Janus connections:', err);
+    } catch (error) {
+      console.error('Failed to clean up Janus connections:', error);
     }
   };
 
@@ -414,6 +431,7 @@ export const useJanus = () => {
     peerConnections,
     loading,
     error,
+    groupErrors, // Neue Map exportieren
     createHandle,
     sendMessage,
     sendTrickle,

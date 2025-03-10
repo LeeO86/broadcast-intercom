@@ -12,26 +12,16 @@
 </template>
 
 <script setup lang="ts">
-const { connected, socket } = useSocket();
+const { connected, socket, watchTransport } = useSocket();
 const { loading } = useJanus();
 
 // Track WebSocket vs polling connection
 const isWebSocket = ref(false);
 
-// Watch for socket connection and transport changes
-watch(() => socket.value, (newSocket) => {
-  if (newSocket) {
-    // Check initial transport
-    isWebSocket.value = newSocket.io.engine.transport.name === 'websocket';
-    
-    // Listen for transport changes
-    newSocket.io.engine.on('upgrade', () => {
-      isWebSocket.value = newSocket.io.engine.transport.name === 'websocket';
-    });
-  } else {
-    isWebSocket.value = false;
-  }
-}, { immediate: true });
+// Use the function instead of direct socket.value access
+watchTransport((transport) => {
+  isWebSocket.value = transport === 'websocket';
+});
 
 // Computed status
 const status = computed(() => {

@@ -5,6 +5,7 @@ let socket: Socket | null = null;
 
 export const useSocket = () => {
   const config = useRuntimeConfig();
+  const { requestMicrophonePermission } = useAudio();
   const connected = ref(false);
   const error = ref<string | null>(null);
   const userStore = useUserStore();
@@ -13,7 +14,8 @@ export const useSocket = () => {
   const initSocket = () => {
     if (socket) return socket;
 
-    const socketUrl = config.public.socketUrl || window.location.origin;
+const url = useRequestURL();
+    const socketUrl = config.public.socketUrl || `${url.protocol}//${url.host}`;
     socket = io(socketUrl, {
       autoConnect: true,
       reconnection: true,
@@ -23,7 +25,7 @@ export const useSocket = () => {
       transports: ['websocket', 'polling'] // Try WebSocket first, fall back to polling
     });
 
-    socket.on('connect', () => {
+    socket.on('connect', async () => {
       connected.value = true;
       error.value = null;
       console.log('Socket connected using transport:', socket?.io.engine.transport.name);
@@ -32,6 +34,9 @@ export const useSocket = () => {
       socket?.io.engine.on('upgrade', () => {
         console.log('Socket transport upgraded to:', socket?.io.engine.transport.name);
       });
+
+      // Request microphone permission
+      await requestMicrophonePermission();
     });
 
     socket.on('disconnect', () => {
@@ -44,12 +49,12 @@ export const useSocket = () => {
       error.value = err.message;
       console.error('Socket connection error:', err);
     });
-    
+
     // Listen for user ID assignment
     socket.on(SocketEvents.USER_ID, ({ userId }) => {
       // Only set the ID if we don't have one yet
-      if (!userStore.isInitialized) {
-        userStore.initialize();
+      if (!userStore.id) {
+        userStore.id = userId;
       }
     });
 
@@ -113,10 +118,34 @@ export const useSocket = () => {
     return () => socket?.off(SocketEvents.ERROR, callback);
   };
 
+  // Listen for users list
+  const onUsersList = (callback: (data: any) => void) => {
+    socket?.on(SocketEvents.USERS_LIST, callback);
+    return () => socket?.off(SocketEvents.USERS_LIST, callback);
+  };
+
+  // Listen for publisher changes
+  const onPublisherChanged = (callback: (data: any) => void) => {
+    socket?.on(SocketEvents.PUBLISHER_CHANGED, callback);
+    return () => socket?.off(SocketEvents.PUBLISHER_CHANGED, callback);
+  };
+
+  // Listen for production updates
+  const onProductionUpdated = (callback: () => void) => {
+    socket?.on(SocketEvents.PRODUCTION_UPDATED, callback);
+    return () => socket?.off(SocketEvents.PRODUCTION_UPDATED, callback);
+  };
+
+  // Listen for group updates
+  const onGroupUpdated = (callback: () => void) => {
+    socket?.on(SocketEvents.GROUP_UPDATED, callback);
+    return () => socket?.off(SocketEvents.GROUP_UPDATED, callback);
+  };
+
   // Janus WebSocket methods
   const createJanusHandle = (plugin: string, id?: string): Promise<string> => {
     if (!socket) initSocket();
-    
+
     return new Promise((resolve, reject) => {
       socket?.once(JanusSocketEvents.HANDLE_CREATED, (response) => {
         if (response.success) {
@@ -125,18 +154,18 @@ export const useSocket = () => {
           reject(new Error(response.error || 'Failed to create Janus handle'));
         }
       });
-      
+
       socket?.once(JanusSocketEvents.ERROR, (response) => {
         reject(new Error(response.error || 'Failed to create Janus handle'));
       });
-      
+
       socket?.emit(JanusSocketEvents.CREATE_HANDLE, { plugin, id });
     });
   };
-  
+
   const sendJanusMessage = (handleId: string, message: any): Promise<any> => {
     if (!socket) initSocket();
-    
+
     return new Promise((resolve, reject) => {
       socket?.once(JanusSocketEvents.MESSAGE_RESPONSE, (response) => {
         if (response.success) {
@@ -145,18 +174,18 @@ export const useSocket = () => {
           reject(new Error(response.error || 'Failed to send Janus message'));
         }
       });
-      
+
       socket?.once(JanusSocketEvents.ERROR, (response) => {
         reject(new Error(response.error || 'Failed to send Janus message'));
       });
-      
+
       socket?.emit(JanusSocketEvents.SEND_MESSAGE, { handleId, message });
     });
   };
-  
+
   const sendJanusTrickle = (handleId: string, candidate: RTCIceCandidate | null): Promise<void> => {
     if (!socket) initSocket();
-    
+
     return new Promise((resolve, reject) => {
       socket?.once(JanusSocketEvents.TRICKLE_RESPONSE, (response) => {
         if (response.success) {
@@ -165,13 +194,38 @@ export const useSocket = () => {
           reject(new Error(response.error || 'Failed to send trickle ICE candidate'));
         }
       });
-      
+
       socket?.once(JanusSocketEvents.ERROR, (response) => {
         reject(new Error(response.error || 'Failed to send trickle ICE candidate'));
       });
-      
+
       socket?.emit(JanusSocketEvents.SEND_TRICKLE, { handleId, candidate });
     });
+  };
+
+  const toggleMute = (groupId: number, muted: boolean) => {
+    socket?.emit('mute_toggle', { groupId, muted });
+  };
+
+  // Neue Funktion zum Überwachen des Transporttyps
+  const watchTransport = (callback: (transport: string) => void) => {
+    if (!socket) initSocket();
+
+    // Check initial transport
+    if (socket?.io?.engine?.transport?.name) {
+      callback(socket.io.engine.transport.name);
+    }
+
+    // Listen for transport changes
+    socket?.io?.engine?.on('upgrade', () => {
+      if (socket?.io?.engine?.transport?.name) {
+        callback(socket.io.engine.transport.name);
+      }
+    });
+
+    return () => {
+      socket?.io?.engine?.off('upgrade');
+    };
   };
 
   // Cleanup
@@ -198,9 +252,14 @@ export const useSocket = () => {
     onTalkingStop,
     onError,
     disconnect,
-    // Janus WebSocket methods
     createJanusHandle,
     sendJanusMessage,
-    sendJanusTrickle
+    sendJanusTrickle,
+    onUsersList,
+    onPublisherChanged,
+    onProductionUpdated,
+    onGroupUpdated,
+    toggleMute,
+    watchTransport
   };
 };

@@ -12,6 +12,6 @@ export default defineEventHandler(async (event) => {
     return { success: true, data: rooms };
   } catch (error) {
     logger.error({ err: error }, 'Error fetching Janus rooms');
-    return { success: false, error: error.message || 'Failed to fetch Janus rooms' };
+    return { success: false, error: (error as Error).message || 'Failed to fetch Janus rooms' };
   }
 });

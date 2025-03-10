@@ -1,8 +1,10 @@
-import { AudioDevice } from '~/types';
+import type { AudioDevice } from '~/types';
 
 export const useAudio = () => {
-  const devices = ref<AudioDevice[]>([]);
+    const devices = ref<AudioDevice[]>([]);
+  const speakerDevices = ref<AudioDevice[]>([]);
   const selectedDevice = ref<string | null>(null);
+  const selectedSpeaker = ref<string | null>(null);
   const stream = ref<MediaStream | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
@@ -22,12 +24,17 @@ export const useAudio = () => {
     try {
       // Check if permission was previously denied
       if (permissionDenied.value) {
-        // Create a mock device instead of requesting permission again
+        // Create mock devices instead of requesting permission again
         devices.value = [{
           deviceId: 'default',
           label: 'Default Microphone (Permission Denied)',
         }];
+        speakerDevices.value = [{
+          deviceId: 'default',
+          label: 'Default Speaker (Permission Denied)',
+        }];
         selectedDevice.value = 'default';
+        selectedSpeaker.value = 'default';
         return devices.value;
       }
       
@@ -42,7 +49,12 @@ export const useAudio = () => {
             deviceId: 'default',
             label: 'Default Microphone (Permission Denied)',
           }];
+          speakerDevices.value = [{
+            deviceId: 'default',
+            label: 'Default Speaker (Permission Denied)',
+          }];
           selectedDevice.value = 'default';
+          selectedSpeaker.value = 'default';
           return devices.value;
         }
         throw err;
@@ -59,9 +71,20 @@ export const useAudio = () => {
           label: device.label || `Microphone ${devices.value.length + 1}`,
         }));
       
-      // If no device is selected and we have devices, select the first one
+      // Filter for audio output devices
+      speakerDevices.value = allDevices
+        .filter(device => device.kind === 'audiooutput')
+        .map(device => ({
+          deviceId: device.deviceId,
+          label: device.label || `Speaker ${speakerDevices.value.length + 1}`,
+        }));
+      
+      // If no device is selected and we have devices, select the first ones
       if (!selectedDevice.value && devices.value.length > 0) {
         selectedDevice.value = devices.value[0].deviceId;
+      }
+      if (!selectedSpeaker.value && speakerDevices.value.length > 0) {
+        selectedSpeaker.value = speakerDevices.value[0].deviceId;
       }
       
       return devices.value;
@@ -69,19 +92,24 @@ export const useAudio = () => {
       error.value = err.message || 'Failed to get audio devices';
       console.error('Error getting audio devices:', err);
       
-      // Create a mock device if there's an error
+      // Create mock devices if there's an error
       devices.value = [{
         deviceId: 'default',
         label: 'Default Microphone',
       }];
+      speakerDevices.value = [{
+        deviceId: 'default',
+        label: 'Default Speaker',
+      }];
       selectedDevice.value = 'default';
+      selectedSpeaker.value = 'default';
       return devices.value;
     } finally {
       loading.value = false;
     }
   };
 
-  // Select an audio device and get its stream
+  // Select an audio input device and get its stream
   const selectDevice = async (deviceId: string) => {
     loading.value = true;
     error.value = null;
@@ -97,11 +125,12 @@ export const useAudio = () => {
         // Create a silent audio context as a fallback
         const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
         const oscillator = ctx.createOscillator();
-        const dst = oscillator.connect(ctx.createMediaStreamDestination());
+        const streamDestination = ctx.createMediaStreamDestination();
+        oscillator.connect(streamDestination);
         oscillator.start();
         
         // Use the silent stream
-        stream.value = dst.stream;
+        stream.value = streamDestination.stream;
         selectedDevice.value = deviceId;
         
         // Set up audio analysis with silent stream
@@ -143,11 +172,12 @@ export const useAudio = () => {
         // Create a silent audio context as a fallback
         const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
         const oscillator = ctx.createOscillator();
-        const dst = oscillator.connect(ctx.createMediaStreamDestination());
+        const destination = ctx.createMediaStreamDestination();
+        oscillator.connect(destination);
         oscillator.start();
         
         // Use the silent stream
-        stream.value = dst.stream;
+        stream.value = destination.stream;
         selectedDevice.value = deviceId;
         
         // Set up audio analysis with silent stream
@@ -159,6 +189,29 @@ export const useAudio = () => {
       return null;
     } finally {
       loading.value = false;
+    }
+  };
+
+  // Select an audio output device (speaker)
+  const selectSpeaker = async (deviceId: string) => {
+    try {
+      selectedSpeaker.value = deviceId;
+      
+      // Save selected speaker to user settings
+      userSettings.setSpeakerDevice(deviceId);
+      
+      // Update all existing audio elements to use the new speaker
+      const audioElements = document.querySelectorAll('audio');
+      for (const element of audioElements) {
+        if ((element as any).setSinkId) {
+          await (element as any).setSinkId(deviceId);
+        }
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error selecting speaker device:', error);
+      return false;
     }
   };
 
@@ -230,16 +283,17 @@ export const useAudio = () => {
     volumeLevel.value = 0;
   };
 
-  // Load user's preferred audio device from settings
-  const loadPreferredDevice = async () => {
+  // Load user's preferred devices from settings
+  const loadPreferredDevices = async () => {
     // Get available devices first
     await getDevices();
     
-    // Get preferred device from user settings
+    // Get preferred devices from user settings
     const preferredDeviceId = userSettings.settings.value.preferredAudioDevice;
+    const preferredSpeakerId = userSettings.settings.value.preferredSpeakerDevice;
     
     if (preferredDeviceId) {
-      // Check if preferred device is available
+      // Check if preferred microphone is available
       const deviceExists = devices.value.some(device => device.deviceId === preferredDeviceId);
       
       if (deviceExists) {
@@ -252,12 +306,51 @@ export const useAudio = () => {
       // If no preferred device, select the first available device
       await selectDevice(devices.value[0].deviceId);
     }
+    
+    if (preferredSpeakerId) {
+      // Check if preferred speaker is available
+      const speakerExists = speakerDevices.value.some(device => device.deviceId === preferredSpeakerId);
+      
+      if (speakerExists) {
+        await selectSpeaker(preferredSpeakerId);
+      } else if (speakerDevices.value.length > 0) {
+        // If preferred speaker is not available, select the first available speaker
+        await selectSpeaker(speakerDevices.value[0].deviceId);
+      }
+    } else if (speakerDevices.value.length > 0) {
+      // If no preferred speaker, select the first available speaker
+      await selectSpeaker(speakerDevices.value[0].deviceId);
+    }
   };
 
-  // Save selected device as preferred
-  const savePreferredDevice = () => {
+  // Save selected devices as preferred
+  const savePreferredDevices = () => {
     if (selectedDevice.value) {
       userSettings.setAudioDevice(selectedDevice.value);
+    }
+    if (selectedSpeaker.value) {
+      userSettings.setSpeakerDevice(selectedSpeaker.value);
+    }
+  };
+
+  // Funktion explizit zum Anfordern der Mikrofonberechtigung hinzufügen
+  const requestMicrophonePermission = async (): Promise<boolean> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Wenn erfolgreich, Stream wieder freigeben
+      stream.getTracks().forEach(track => track.stop());
+      
+      permissionDenied.value = false;
+      
+      // Nach erfolgreicher Berechtigung die Geräte neu laden
+      await getDevices();
+      
+      return true;
+    } catch (err) {
+      console.error('Microphone permission denied:', err);
+      permissionDenied.value = true;
+      return false;
     }
   };
 
@@ -289,7 +382,9 @@ export const useAudio = () => {
 
   return {
     devices,
+    speakerDevices,
     selectedDevice,
+    selectedSpeaker,
     stream,
     loading,
     error,
@@ -297,8 +392,10 @@ export const useAudio = () => {
     permissionDenied,
     getDevices,
     selectDevice,
+    selectSpeaker,
     stopStream,
-    loadPreferredDevice,
-    savePreferredDevice,
+    loadPreferredDevices,
+    savePreferredDevices,
+    requestMicrophonePermission,
   };
 };

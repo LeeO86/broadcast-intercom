@@ -1,13 +1,13 @@
 <template>
   <div>
-    <div v-if="loading" class="flex justify-center items-center h-64">
+    <div v-if="productionLoading" class="flex justify-center items-center h-64">
       <div class="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
     </div>
     
-    <div v-else-if="error" class="max-w-md mx-auto">
+    <div v-else-if="productionError" class="max-w-md mx-auto">
       <div class="bg-danger-50 dark:bg-danger-900/30 p-4 rounded-lg shadow-md">
         <h2 class="text-lg font-medium text-danger-800 dark:text-danger-200">Error</h2>
-        <p class="mt-2 text-danger-700 dark:text-danger-300">{{ error }}</p>
+        <p class="mt-2 text-danger-700 dark:text-danger-300">{{ productionError }}</p>
         <div class="mt-4">
           <NuxtLink 
             to="/" 
@@ -87,7 +87,21 @@
       </div>
       
       <!-- Reload Notification Modal -->
-      <ReloadNotificationModal :show="showReloadModal" @reload="handleReload" />
+      <ReloadNotificationModal 
+        :show="showReloadModal" 
+        type="reload"
+        @reload="handleReload" 
+      />
+      
+      <!-- Neues Modal für Mikrofonberechtigung -->
+      <ReloadNotificationModal
+        :show="showMicrophoneModal"
+        type="microphone"
+        title="Microphone Access Required"
+        message="This app requires access to your microphone for the intercom functionality. Please click the button below to allow access."
+        actionText="Allow Access"
+        @request-microphone="requestMicrophoneAccess"
+      />
     </div>
   </div>
 </template>
@@ -100,8 +114,13 @@ const route = useRoute();
 const router = useRouter();
 const productionCode = computed(() => route.params.code as string);
 
-const { production, loading, error, getProductionByCode } = useProduction();
-const { stream, loadPreferredDevice, permissionDenied: audioPermissionDenied } = useAudio();
+const { production, loading: productionLoading, error: productionError, getProductionByCode } = useProduction();
+const { 
+  stream, 
+  loadPreferredDevices, 
+  permissionDenied: audioPermissionDenied,
+  requestMicrophonePermission // Diese Funktion jetzt von useAudio verwenden
+} = useAudio();
 const { 
   joinAudioRoom, 
   configureAudioRoom, 
@@ -125,6 +144,10 @@ const {
   onUserLeft,
   onTalkingStart,
   onTalkingStop,
+  onUsersList,
+  onPublisherChanged,
+  onProductionUpdated,
+  onGroupUpdated,
   disconnect
 } = useSocket();
 
@@ -136,6 +159,7 @@ const showUserList = ref(false);
 const groupVolumes = ref<Map<number, number>>(new Map());
 const mutedGroups = ref<Set<number>>(new Set());
 const showReloadModal = ref(false);
+const showMicrophoneModal = ref(false);
 
 // Program sound publishers
 const publishers = ref<Map<number, string>>(new Map());
@@ -143,13 +167,14 @@ const isPublisherMap = ref<Map<number, boolean>>(new Map());
 
 // Initialize
 const init = async () => {
+  console.log('Initializing production');
   try {
     // Get production by code
     const prod = await getProductionByCode(productionCode.value);
     if (!prod) return;
     
     // Load audio device
-    await loadPreferredDevice();
+    await loadPreferredDevices();
     
     // Make sure user is initialized
     if (!userStore.isInitialized) {
@@ -165,6 +190,33 @@ const init = async () => {
       display_name: userStore.displayName || userSettings.settings.value.displayName || 'Anonymous',
       is_talking: false,
       last_active: new Date().toISOString(),
+    });
+
+    // Listen for users list
+    const usersListUnsub = onUsersList((users) => {
+      // Replace the group members with the received list
+      // but keep the current user
+      const currentUser = groupMembers.value.find(m => m.id === userStore.id);
+      
+      if (currentUser) {
+        // Filter out the current user from the received list to avoid duplicates
+        const otherUsers = users.filter((u: any) => u.id !== userStore.id);
+        
+        // Create a new array with the current user and other users
+        groupMembers.value = [
+          currentUser,
+          ...otherUsers.map((u: any) => ({
+            id: u.id,
+            display_name: u.displayName,
+            is_talking: false,
+            last_active: new Date().toISOString(),
+          }))
+        ];
+      }
+    });
+
+    onUnmounted(() => {
+      usersListUnsub();
     });
     
     // Join production via socket
@@ -198,7 +250,8 @@ const init = async () => {
         await configureAudioRoom(
           group.id, 
           stream.value || undefined, 
-          audioConstraints
+          audioConstraints,
+          group.settings.muted_by_default
         );
         
         // Initialize group volume from user settings
@@ -215,7 +268,7 @@ const init = async () => {
     
     toast.success(`Joined production: ${prod.name}`);
   } catch (err: any) {
-    error.value = err.message || 'Failed to join production';
+    productionError.value = err.message || 'Failed to join production';
     console.error('Error initializing production:', err);
   }
 };
@@ -276,31 +329,8 @@ const setupSocketListeners = () => {
     talkingUsers.value.delete(data.groupId);
   });
   
-  // Listen for users list
-  socket.value?.on(SocketEvents.USERS_LIST, (users) => {
-    // Replace the group members with the received list
-    // but keep the current user
-    const currentUser = groupMembers.value.find(m => m.id === userStore.id);
-    
-    if (currentUser) {
-      // Filter out the current user from the received list to avoid duplicates
-      const otherUsers = users.filter((u: any) => u.id !== userStore.id);
-      
-      // Create a new array with the current user and other users
-      groupMembers.value = [
-        currentUser,
-        ...otherUsers.map((u: any) => ({
-          id: u.id,
-          display_name: u.displayName,
-          is_talking: false,
-          last_active: new Date().toISOString(),
-        }))
-      ];
-    }
-  });
-  
   // Listen for publisher changes
-  socket.value?.on(SocketEvents.PUBLISHER_CHANGED, (data) => {
+  const publisherChangedUnsub = onPublisherChanged((data) => {
     if (data.userId) {
       // Someone became the publisher
       publishers.value.set(data.groupId, data.displayName);
@@ -321,12 +351,14 @@ const setupSocketListeners = () => {
   });
   
   // Listen for production updates
-  socket.value?.on(SocketEvents.PRODUCTION_UPDATED, () => {
+  const productionUpdatedUnsub = onProductionUpdated(() => {
+    console.log('Production updated');
     showReloadModal.value = true;
   });
   
   // Listen for group updates
-  socket.value?.on(SocketEvents.GROUP_UPDATED, () => {
+  const groupUpdatedUnsub = onGroupUpdated(() => {
+    console.log('Group updated');
     showReloadModal.value = true;
   });
   
@@ -336,10 +368,9 @@ const setupSocketListeners = () => {
     userLeftUnsub();
     talkingStartUnsub();
     talkingStopUnsub();
-    socket.value?.off(SocketEvents.USERS_LIST);
-    socket.value?.off(SocketEvents.PUBLISHER_CHANGED);
-    socket.value?.off(SocketEvents.PRODUCTION_UPDATED);
-    socket.value?.off(SocketEvents.GROUP_UPDATED);
+    publisherChangedUnsub(); 
+    productionUpdatedUnsub();
+    groupUpdatedUnsub();
   });
 };
 
@@ -543,7 +574,14 @@ const leaveProduction = async () => {
 };
 
 // Initialize on mount
-onMounted(init);
+onMounted(async () => {
+  await init();
+  
+  // Falls wir bereits wissen, dass die Berechtigung verweigert wurde, Modal sofort anzeigen
+  if (audioPermissionDenied.value) {
+    showMicrophoneModal.value = true;
+  }
+});
 
 // Clean up on unmount
 onUnmounted(async () => {
@@ -570,4 +608,29 @@ onUnmounted(async () => {
     console.error('Error cleaning up:', err);
   }
 });
+
+watch(audioPermissionDenied, (denied) => {
+  if (denied) {
+    showMicrophoneModal.value = true;
+  } else {
+    showMicrophoneModal.value = false;
+  }
+});
+
+// Funktion für die Anforderung der Mikrofonberechtigung
+const requestMicrophoneAccess = async () => {
+  try {
+    const hasPermission = await requestMicrophonePermission(); 
+    if (hasPermission) {
+      showMicrophoneModal.value = false;
+      await loadPreferredDevices();
+      toast.success('Microphone Access granted');
+    } else {
+      toast.error('Microphone Access Required');
+    }
+  } catch (err) {
+    console.error('Error requesting microphone access:', err);
+    toast.error('Error requesting microphone access');
+  }
+};
 </script>

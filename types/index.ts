@@ -5,7 +5,7 @@ export interface Production {
   access_code: string;
   created_at: string;
   changed_at: string;
-  email_template?: string; // New field for email template
+  email_template?: string;
 }
 
 export interface Group {
@@ -15,10 +15,8 @@ export interface Group {
   janus_room_id: number;
   created_at: string;
   changed_at: string;
-  // New settings fields
   settings: GroupSettings;
   ui_settings: GroupUISettings;
-  // Group type
   type: GroupType;
 }
 
@@ -53,6 +51,7 @@ export interface PeerConnection {
   groupId: number;
   handleId: string;
   stream?: MediaStream;
+  audioElement?: HTMLAudioElement;
 }
 
 export interface AudioDevice {
@@ -112,8 +111,9 @@ export interface ProductionWithGroups extends Production {
 export interface UserSettings {
   displayName: string;
   preferredAudioDevice?: string;
+  preferredSpeakerDevice?: string;
   theme: 'light' | 'dark' | 'system';
-  groupVolumes: Record<number, number>; // groupId -> volume (0-100)
+  groupVolumes: Record<number, number>;
   audioSettings?: {
     noiseSuppression: boolean;
     echoCancellation: boolean;
@@ -163,7 +163,7 @@ export const DEFAULT_GROUP_SETTINGS: GroupSettings = {
 // Default Group UI Settings
 export const DEFAULT_GROUP_UI_SETTINGS: GroupUISettings = {
   button_style: 'round',
-  color: '#3B82F6' // primary-500
+  color: '#3B82F6'
 };
 
 // Available Group Colors

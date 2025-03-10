@@ -1,6 +1,7 @@
 import { createLogger } from './logger';
 import Janode from 'janode';
 import AudioBridgePlugin from 'janode/plugins/audiobridge';
+import { set } from 'zod';
 
 const logger = createLogger('janus');
 
@@ -52,6 +53,17 @@ export async function initJanus() {
     });
     
     logger.info('Connection with Janus created');
+
+    if(!janodeConnection) {
+      logger.error('Failed to connect to Janus');
+      setTimeout(() => {
+        initJanus().catch(err => {
+          logger.error({ err }, 'Failed to reconnect to Janus');
+        });
+      }
+      , 10000); // Retry after 10 seconds
+      return false;
+    }
     
     // Set up connection event handlers
     janodeConnection.once(Janode.EVENT.CONNECTION_CLOSED, () => {
@@ -64,7 +76,7 @@ export async function initJanus() {
         initJanus().catch(err => {
           logger.error({ err }, 'Failed to reconnect to Janus');
         });
-      }, 10000); // Retry after 10 seconds
+      }, 2000); // Retry after 2 seconds
     });
     
     janodeConnection.once(Janode.EVENT.CONNECTION_ERROR, ({ message }) => {
@@ -223,19 +235,6 @@ export async function deleteAudioRoom(roomId) {
   }
 }
 
-function mapToObject(map: Map<any, any>): object {
-  const obj: { [key: string]: any } = {};
-  for (const [key, value] of map) {
-    if (value instanceof Map) {
-      // If the value is a Map, recursively convert it to an object
-      obj[key] = mapToObject(value);
-    } else {
-      obj[key] = value;
-    }
-  }
-  return obj;
-}
-
 // Get or create a handle for a specific client and group
 export async function getClientGroupHandle(clientId: string, groupId: number, janusRoomId: number) {
   logger.trace(`getClientGroupHandle("${clientId}", ${groupId}, ${janusRoomId}) called`);
@@ -250,7 +249,6 @@ export async function getClientGroupHandle(clientId: string, groupId: number, ja
     if (!clientHandles.has(clientId)) {
       clientHandles.set(clientId, new Map());
     }
-    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId }, 'getClientGroupHandle(): List all Handles');
     const clientGroupHandles = clientHandles.get(clientId);
     
     // If we already have a handle for this group, return it
@@ -275,7 +273,7 @@ export async function getClientGroupHandle(clientId: string, groupId: number, ja
 
 // Join a client to an audiobridge room
 export async function joinClientToRoom(clientId: string, groupId: number, janusRoomId: number, displayName: string, muted = true) {
-  logger.trace(`joinClientToRoom("${clientId}", ${groupId}, ${janusRoomId}, "${displayName}") called`);
+  logger.trace(`joinClientToRoom("${clientId}", ${groupId}, ${janusRoomId}, "${displayName}", ${muted}) called`);
   
   try {
     // Get or create a handle for this client and group
@@ -287,7 +285,6 @@ export async function joinClientToRoom(clientId: string, groupId: number, janusR
       display: displayName,
       muted: muted
     });
-    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId, handleId: handle.id }, 'joinClientToRoom(): List all Handles');
     logger.info({ clientId, groupId, janusRoomId, displayName, response }, 'Client joined audiobridge room');
     
     return { success: true, handleId: handle.id, data: response };
@@ -298,7 +295,7 @@ export async function joinClientToRoom(clientId: string, groupId: number, janusR
 }
 
 // Configure a client's WebRTC connection
-export async function configureClientWebRTC(clientId, groupId, jsep, muted = false) {
+export async function configureClientWebRTC(clientId, groupId, jsep, muted = true) {
   logger.trace(`configureClientWebRTC("${clientId}", ${groupId}) called`);
   
   try {
@@ -308,7 +305,6 @@ export async function configureClientWebRTC(clientId, groupId, jsep, muted = fal
     }
     
     const handle = clientHandles.get(clientId).get(groupId);
-    logger.trace({ mapToObject: mapToObject(clientHandles), clientId, groupId, handleId: handle.id }, 'configureClientWebRTC(): List all Handles');
     // Configure the WebRTC connection
     const response = await handle.configure({
       muted: muted,
@@ -333,7 +329,6 @@ export async function setClientMute(clientId: string, groupId: number, muted: bo
     if (!clientHandles.has(clientId) || !clientHandles.get(clientId).has(groupId)) {
       throw new Error(`No handle found for client ${clientId} and group ${groupId}`);
     }
-    logger.trace({ clientHandles: mapToObject(clientHandles), clientId, groupId }, 'setClientMute(): List all Handles');
     const handle = clientHandles.get(clientId).get(groupId);
 
     logger.trace({ clientId, groupId, handleId: handle.id }, 'setClientMute(): Chosen Handle');
@@ -546,12 +541,34 @@ export async function getAllRooms() {
     const handle = await janodeSession.attach<JanusPluginHandle>(AudioBridgePlugin);
     logger.debug({ handleId: handle.id }, 'Audiobridge handle attached for listing rooms');
     
+    // Check if list method exists before calling it
+    if (typeof handle.list !== 'function') {
+      logger.warn('The list method is not available on the handle');
+      await handle.detach();
+      return Array.from(rooms.values());
+    }
+    
     // List all rooms
     const response = await handle.list();
     logger.debug({ response }, 'Retrieved rooms list from Janus');
     
     // Format the response
-    const roomsList = response.list.map(room => ({
+    // Define interfaces for room data
+    interface JanusRoom {
+      room: number;
+      description?: string;
+      num_participants?: number;
+    }
+
+    interface RoomInfo {
+      id: number;
+      description: string;
+      created: string;
+      participants: number;
+    }
+
+    // Apply types to the room list mapping
+    const roomsList: RoomInfo[] = (response as { list: JanusRoom[] }).list.map((room: JanusRoom) => ({
       id: room.room,
       description: room.description || '',
       created: new Date().toISOString(), // Janus doesn't provide creation time

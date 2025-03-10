@@ -114,7 +114,7 @@ import { toast } from 'vue-sonner';
 
 const userSettings = useUserSettings();
 const userStore = useUserStore();
-const { selectedDevice, loadPreferredDevice, savePreferredDevice } = useAudio();
+const { selectedDevice, loadPreferredDevices, savePreferredDevice } = useAudio();
 
 const displayName = ref(userStore.displayName || userSettings.settings.value.displayName || '');
 const audioSettings = ref({
@@ -125,7 +125,7 @@ const audioSettings = ref({
 
 // Load preferred device on mount
 onMounted(async () => {
-  await loadPreferredDevice();
+  await loadPreferredDevices();
   
   // Initialize user store if needed
   if (!userStore.isInitialized) {
