@@ -542,6 +542,7 @@ export default defineNitroPlugin((nitroApp: NitroApp) => {
         else if (requestType === 'configure') {
           // Configure the WebRTC connection
           if (message.jsep) {
+            logger.trace({ socketId: socket.id, handleId, groupId, jsep: message.jsep }, 'Configuring WebRTC connection');
             response = await configureClientWebRTC(
               user.id,
               groupId,

@@ -1,5 +1,15 @@
 <template>
   <div>
+    <!-- Mobile Audio Start Modal -->
+    <ReloadNotificationModal
+      :show="showMobileAudioModal"
+      type="microphone"
+      title="Start Audio"
+      message="To use the intercom system on your mobile device, please tap the button below to start audio."
+      action-text="Start Audio"
+      @request-microphone="startMobileAudio"
+    />
+
     <div v-if="productionLoading" class="flex justify-center items-center h-64">
       <div class="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
     </div>
@@ -52,9 +62,17 @@
       
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <div v-for="group in production?.groups" :key="group.id" class="h-40">
+          <!-- Show error state if there's an error for this group -->
+          <GroupErrorState
+            v-if="getGroupError(group.id)"
+            :title="getErrorTitle(getGroupError(group.id)!)"
+            :message="getErrorMessage(getGroupError(group.id)!)"
+            @retry="retryGroupConnection(group.id)"
+          />
+          
           <!-- Intercom Group -->
           <PTTButton
-            v-if="group.type === 'intercom'"
+            v-else-if="group.type === 'intercom'"
             :group-id="group.id"
             :name="group.name"
             :other-talking="isSomeoneElseTalking(group.id)"
@@ -82,24 +100,28 @@
         </div>
       </div>
       
+      <!-- User List -->
       <div v-if="showUserList" class="fixed top-20 right-4 z-10">
         <UserList :users="groupMembers" @toggle="showUserList = false" />
       </div>
       
       <!-- Reload Notification Modal -->
       <ReloadNotificationModal 
-        :show="showReloadModal" 
-        type="reload"
-        @reload="handleReload" 
+        :show="showReloadModal || hasGlobalError" 
+        :type="globalError ? 'error' : 'reload'"
+        :title="globalError ? getErrorTitle(globalError) : 'Updates Available'"
+        :message="globalError ? getErrorMessage(globalError) : 'Changes have been made to the production. Please reload to see the latest updates.'"
+        :action-text="globalError ? 'Retry Connection' : 'Reload Now'"
+        @action="globalError ? retryGlobalConnection() : handleReload"
       />
       
-      <!-- Neues Modal für Mikrofonberechtigung -->
+      <!-- Microphone Permission Modal -->
       <ReloadNotificationModal
         :show="showMicrophoneModal"
         type="microphone"
         title="Microphone Access Required"
         message="This app requires access to your microphone for the intercom functionality. Please click the button below to allow access."
-        actionText="Allow Access"
+        action-text="Allow Access"
         @request-microphone="requestMicrophoneAccess"
       />
     </div>
@@ -108,6 +130,8 @@
 
 <script setup lang="ts">
 import { GroupMember, GroupType, SocketEvents } from '~/types';
+import { useJanusErrors } from '~/composables/useJanusErrors';
+import { JanusErrorType } from '~/types';
 import { toast } from 'vue-sonner';
 
 const route = useRoute();
@@ -119,7 +143,8 @@ const {
   stream, 
   loadPreferredDevices, 
   permissionDenied: audioPermissionDenied,
-  requestMicrophonePermission // Diese Funktion jetzt von useAudio verwenden
+  requestMicrophonePermission,
+  setGroupVolume
 } = useAudio();
 const { 
   joinAudioRoom, 
@@ -151,6 +176,8 @@ const {
   disconnect
 } = useSocket();
 
+const showMobileAudioModal = ref(false);
+
 const userSettings = useUserSettings();
 const userStore = useUserStore();
 const groupMembers = ref<GroupMember[]>([]);
@@ -164,6 +191,43 @@ const showMicrophoneModal = ref(false);
 // Program sound publishers
 const publishers = ref<Map<number, string>>(new Map());
 const isPublisherMap = ref<Map<number, boolean>>(new Map());
+
+// Initialize error handling
+const { 
+  getGroupError,
+  setGroupError,
+  clearGroupError,
+  globalError,
+  hasGlobalError,
+  setGlobalError,
+  clearGlobalError,
+  getErrorMessage,
+  getErrorTitle
+} = useJanusErrors();
+
+const isMobileBrowser = () => {
+  if (!process.client) return false;
+  
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent
+  );
+};
+
+const startMobileAudio = async () => {
+  try {   
+    const stream = navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    await init();
+    showMobileAudioModal.value = false;
+
+  } catch (error) {
+    console.error('Error starting audio on mobile:', error);
+    toast.error(`Failed to start audio. Please check your permissions. ${error}`);
+    
+    if (audioPermissionDenied.value) {
+      showMicrophoneModal.value = true;
+    }
+  }
+};
 
 // Initialize
 const init = async () => {
@@ -259,7 +323,11 @@ const init = async () => {
         groupVolumes.value.set(group.id, savedVolume);
       } catch (err) {
         console.error(`Error joining audio room for group ${group.id}:`, err);
-        // Continue with other groups even if one fails
+        setGroupError(group.id, {
+          type: JanusErrorType.ROOM,
+          message: 'Failed to join audio room',
+          groupId: group.id
+        });
       }
     }
     
@@ -270,6 +338,10 @@ const init = async () => {
   } catch (err: any) {
     productionError.value = err.message || 'Failed to join production';
     console.error('Error initializing production:', err);
+    setGlobalError({
+      type: JanusErrorType.CONNECTION,
+      message: 'Failed to initialize production'
+    });
   }
 };
 
@@ -362,6 +434,24 @@ const setupSocketListeners = () => {
     showReloadModal.value = true;
   });
   
+  // Listen for Janus errors
+  socket.value?.on(SocketEvents.JANUS_ERROR, (error) => {
+    if (error.groupId) {
+      setGroupError(error.groupId, {
+        type: error.type || JanusErrorType.UNKNOWN,
+        message: error.message,
+        groupId: error.groupId,
+        code: error.code
+      });
+    } else {
+      setGlobalError({
+        type: error.type || JanusErrorType.UNKNOWN,
+        message: error.message,
+        code: error.code
+      });
+    }
+  });
+  
   // Clean up listeners on component unmount
   onUnmounted(() => {
     userJoinedUnsub();
@@ -371,7 +461,60 @@ const setupSocketListeners = () => {
     publisherChangedUnsub(); 
     productionUpdatedUnsub();
     groupUpdatedUnsub();
+    socket.value?.off(SocketEvents.JANUS_ERROR);
   });
+};
+
+// Retry connection for a specific group
+const retryGroupConnection = async (groupId: number) => {
+  try {
+    clearGroupError(groupId);
+    
+    // Get group info
+    const group = production.value?.groups.find(g => g.id === groupId);
+    if (!group) return;
+    
+    // Rejoin the group
+    await joinGroupSocket(groupId);
+    
+    // Configure audio
+    await configureAudioRoom(
+      groupId,
+      stream.value || undefined,
+      {
+        echoCancellation: userSettings.settings.value.audioSettings?.echoCancellation ?? true,
+        noiseSuppression: userSettings.settings.value.audioSettings?.noiseSuppression ?? true,
+        autoGainControl: userSettings.settings.value.audioSettings?.autoGainControl ?? true
+      },
+      group.settings.muted_by_default
+    );
+    
+    toast.success('Reconnected successfully');
+  } catch (error) {
+    console.error(`Error retrying connection for group ${groupId}:`, error);
+    setGroupError(groupId, {
+      type: JanusErrorType.CONNECTION,
+      message: 'Failed to reconnect to the audio server',
+      groupId
+    });
+    toast.error('Failed to reconnect');
+  }
+};
+
+// Retry global connection
+const retryGlobalConnection = async () => {
+  try {
+    clearGlobalError();
+    await init();
+    toast.success('Reconnected successfully');
+  } catch (error) {
+    console.error('Error retrying global connection:', error);
+    setGlobalError({
+      type: JanusErrorType.CONNECTION,
+      message: 'Failed to reconnect to the server'
+    });
+    toast.error('Failed to reconnect');
+  }
 };
 
 // Handle talking start
@@ -394,8 +537,13 @@ const handleTalkingStart = async (groupId: number) => {
     
     // Notify others via socket
     startTalkingSocket(groupId);
-  } catch (err) {
-    console.error(`Failed to start talking in group ${groupId}:`, err);
+  } catch (error) {
+    console.error(`Failed to start talking in group ${groupId}:`, error);
+    setGroupError(groupId, {
+      type: JanusErrorType.MEDIA,
+      message: 'Failed to start audio transmission',
+      groupId
+    });
     toast.error('Failed to start talking');
   }
 };
@@ -408,13 +556,18 @@ const handleTalkingStop = async (groupId: number) => {
     
     // Notify others via socket
     stopTalkingSocket(groupId);
-  } catch (err) {
-    console.error(`Failed to stop talking in group ${groupId}:`, err);
+  } catch (error) {
+    console.error(`Failed to stop talking in group ${groupId}:`, error);
+    setGroupError(groupId, {
+      type: JanusErrorType.MEDIA,
+      message: 'Failed to stop audio transmission',
+      groupId
+    });
   }
 };
 
 // Handle volume change
-const handleVolumeChange = ({ groupId, volume }: { groupId: number, volume: number }) => {
+const handleVolumeChange = async ({ groupId, volume }: { groupId: number, volume: number }) => {
   // Save volume to user settings
   userSettings.setGroupVolume(groupId, volume);
   
@@ -494,7 +647,7 @@ const handleBecomePublisher = async (groupId: number) => {
       toast.error('Unmute the group to broadcast');
       return;
     }
-    
+
     // Start talking in Janus
     await startJanusTalking(groupId);
     
@@ -502,8 +655,13 @@ const handleBecomePublisher = async (groupId: number) => {
     socket.value?.emit(SocketEvents.PUBLISHER_CHANGED, { groupId });
     
     toast.success('You are now broadcasting');
-  } catch (err) {
-    console.error(`Failed to become publisher for group ${groupId}:`, err);
+  } catch (error) {
+    console.error(`Failed to become publisher for group ${groupId}:`, error);
+    setGroupError(groupId, {
+      type: JanusErrorType.MEDIA,
+      message: 'Failed to start broadcasting',
+      groupId
+    });
     toast.error('Failed to start broadcasting');
   }
 };
@@ -527,15 +685,37 @@ const handleStopBroadcasting = async (groupId: number) => {
     publishers.value.delete(groupId);
     
     toast.info('Broadcasting stopped');
-  } catch (err) {
-    console.error(`Failed to stop broadcasting for group ${groupId}:`, err);
+  } catch (error) {
+    console.error(`Failed to stop broadcasting for group ${groupId}:`, error);
+    setGroupError(groupId, {
+      type: JanusErrorType.MEDIA,
+      message: 'Failed to stop broadcasting',
+      groupId
+    });
   }
 };
 
 // Handle reload button click
 const handleReload = () => {
-  // The actual reload is handled by the ReloadNotificationModal component
   showReloadModal.value = false;
+  window.location.reload();
+};
+
+// Request microphone access
+const requestMicrophoneAccess = async () => {
+  try {
+    const hasPermission = await requestMicrophonePermission();
+    if (hasPermission) {
+      showMicrophoneModal.value = false;
+      await loadPreferredDevices();
+      toast.success('Microphone access granted');
+    } else {
+      toast.error('Microphone access required');
+    }
+  } catch (error) {
+    console.error('Error requesting microphone access:', error);
+    toast.error('Error requesting microphone access');
+  }
 };
 
 // Leave production
@@ -550,9 +730,8 @@ const leaveProduction = async () => {
         try {
           // Leave Janus audiobridge room
           await leaveAudioRoom(group.id);
-        } catch (err) {
-          console.error(`Error leaving audio room for group ${group.id}:`, err);
-          // Continue with other groups even if one fails
+        } catch (error) {
+          console.error(`Error leaving audio room for group ${group.id}:`, error);
         }
       }
       
@@ -566,8 +745,8 @@ const leaveProduction = async () => {
     
     // Navigate back to home
     router.push('/');
-  } catch (err) {
-    console.error('Error leaving production:', err);
+  } catch (error) {
+    console.error('Error leaving production:', error);
     // Still navigate back to home even if there's an error
     router.push('/');
   }
@@ -575,9 +754,14 @@ const leaveProduction = async () => {
 
 // Initialize on mount
 onMounted(async () => {
-  await init();
+  // Check if mobile browser and show audio modal
+  if (isMobileBrowser()) {
+    showMobileAudioModal.value = true;
+  } else {
+    await init();
+  }
   
-  // Falls wir bereits wissen, dass die Berechtigung verweigert wurde, Modal sofort anzeigen
+  // Show microphone modal if permission is denied
   if (audioPermissionDenied.value) {
     showMicrophoneModal.value = true;
   }
@@ -592,8 +776,8 @@ onUnmounted(async () => {
         leaveGroupSocket(group.id);
         try {
           await leaveAudioRoom(group.id);
-        } catch (err) {
-          console.error(`Error leaving audio room for group ${group.id}:`, err);
+        } catch (error) {
+          console.error(`Error leaving audio room for group ${group.id}:`, error);
         }
       }
       
@@ -604,11 +788,12 @@ onUnmounted(async () => {
     // Clean up
     await cleanup();
     disconnect();
-  } catch (err) {
-    console.error('Error cleaning up:', err);
+  } catch (error) {
+    console.error('Error cleaning up:', error);
   }
 });
 
+// Watch for microphone permission changes
 watch(audioPermissionDenied, (denied) => {
   if (denied) {
     showMicrophoneModal.value = true;
@@ -616,21 +801,4 @@ watch(audioPermissionDenied, (denied) => {
     showMicrophoneModal.value = false;
   }
 });
-
-// Funktion für die Anforderung der Mikrofonberechtigung
-const requestMicrophoneAccess = async () => {
-  try {
-    const hasPermission = await requestMicrophonePermission(); 
-    if (hasPermission) {
-      showMicrophoneModal.value = false;
-      await loadPreferredDevices();
-      toast.success('Microphone Access granted');
-    } else {
-      toast.error('Microphone Access Required');
-    }
-  } catch (err) {
-    console.error('Error requesting microphone access:', err);
-    toast.error('Error requesting microphone access');
-  }
-};
 </script>

@@ -26,6 +26,23 @@ export enum GroupType {
   PROGRAM = 'program'
 }
 
+// Error Types
+export enum JanusErrorType {
+  CONNECTION = 'connection',
+  ROOM = 'room',
+  MEDIA = 'media',
+  WEBRTC = 'webrtc',
+  UNKNOWN = 'unknown'
+}
+
+export interface JanusError {
+  type: JanusErrorType;
+  message: string;
+  groupId?: number;
+  code?: number;
+  details?: string;
+}
+
 // Activity Log
 export interface ActivityLogEntry {
   id: number;
@@ -82,7 +99,8 @@ export enum SocketEvents {
   PRODUCTION_UPDATED = 'production_updated',
   GROUP_UPDATED = 'group_updated',
   ERROR = 'error',
-  USER_ID = 'user_id'
+  USER_ID = 'user_id',
+  JANUS_ERROR = 'janus_error'
 }
 
 // Janus WebSocket Events

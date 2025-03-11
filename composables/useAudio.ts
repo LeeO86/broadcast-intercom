@@ -1,20 +1,137 @@
 import type { AudioDevice } from '~/types';
 
 export const useAudio = () => {
-    const devices = ref<AudioDevice[]>([]);
+  const devices = ref<AudioDevice[]>([]);
   const speakerDevices = ref<AudioDevice[]>([]);
   const selectedDevice = ref<string | null>(null);
   const selectedSpeaker = ref<string | null>(null);
   const stream = ref<MediaStream | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const audioContext = ref<AudioContext | null>(null);
   const analyser = ref<AnalyserNode | null>(null);
   const volumeLevel = ref<number>(0);
   const permissionDenied = ref(false);
+
+  // Audio processing
+  const audioContext = ref<AudioContext | null>(null);
+  const gainNodes = ref<Map<number, GainNode>>(new Map());
+  const audioSources = ref<Map<number, MediaStreamAudioSourceNode>>(new Map());
+  const audioDestinations = ref<Map<number, MediaStreamAudioDestinationNode>>(new Map());
   
   // Get user settings store for persistent storage
   const userSettings = useUserSettings();
+
+  // Initialize audio context
+  const initAudioContext = async () => {
+    if (!audioContext.value) {
+      audioContext.value = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    return audioContext.value;
+  };
+
+  // Create gain node for a group
+  const createGainNode = async (groupId: number) => {
+    const ctx = await initAudioContext();
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1; // Start at full volume
+    gainNodes.value.set(groupId, gainNode);
+    return gainNode;
+  };
+
+  // Get or create gain node for a group
+  const getGainNode = async (groupId: number) => {
+    let gainNode = gainNodes.value.get(groupId);
+    if (!gainNode) {
+      gainNode = await createGainNode(groupId);
+    }
+    return gainNode;
+  };
+
+  // Set volume for a group using logarithmic scaling
+  const setGroupVolume = async (groupId: number, volume: number) => {
+    const gainNode = await getGainNode(groupId);
+    
+    // Convert linear volume (0-100) to exponential (-60db to 0db)
+    // Use a minimum of -60dB instead of -Infinity for zero volume
+    const minDb = -60;
+    const dbVolume = volume > 0 ? 
+      20 * Math.log10(volume / 100) : 
+      minDb;
+    
+    // Clamp the volume between minDb and 0dB
+    const clampedDb = Math.max(minDb, Math.min(0, dbVolume));
+    
+    // Convert to gain value and apply
+    gainNode.gain.value = Math.pow(10, clampedDb / 20);
+  };
+
+  // Process audio stream for a group
+  const processAudioForGroup = async (groupId: number, inputStream: MediaStream) => {
+    const ctx = await initAudioContext();
+    
+    // Create source from input stream
+    const source = ctx.createMediaStreamSource(inputStream);
+    audioSources.value.set(groupId, source);
+    
+    // Get gain node
+    const gainNode = await getGainNode(groupId);
+    
+    // Create destination
+    const destination = ctx.createMediaStreamDestination();
+    audioDestinations.value.set(groupId, destination);
+    
+    // Connect the audio graph
+    source.connect(gainNode);
+    gainNode.connect(destination);
+    
+    // Apply initial volume from user settings
+    const savedVolume = userSettings.getGroupVolume(groupId);
+    if (savedVolume !== undefined) {
+      await setGroupVolume(groupId, savedVolume);
+    }
+    
+    return destination.stream;
+  };
+
+  // Clean up audio processing for a group
+  const cleanupGroupAudio = (groupId: number) => {
+    const source = audioSources.value.get(groupId);
+    if (source) {
+      source.disconnect();
+      audioSources.value.delete(groupId);
+    }
+    
+    const gainNode = gainNodes.value.get(groupId);
+    if (gainNode) {
+      gainNode.disconnect();
+      gainNodes.value.delete(groupId);
+    }
+    
+    const destination = audioDestinations.value.get(groupId);
+    if (destination) {
+      destination.disconnect();
+      audioDestinations.value.delete(groupId);
+    }
+  };
+
+  // Clean up all audio processing
+  const cleanupAudio = async () => {
+    // Disconnect all nodes
+    audioSources.value.forEach(source => source.disconnect());
+    gainNodes.value.forEach(node => node.disconnect());
+    audioDestinations.value.forEach(dest => dest.disconnect());
+    
+    // Clear maps
+    audioSources.value.clear();
+    gainNodes.value.clear();
+    audioDestinations.value.clear();
+    
+    // Close audio context
+    if (audioContext.value && audioContext.value.state !== 'closed') {
+      await audioContext.value.close();
+      audioContext.value = null;
+    }
+  };
 
   // Get available audio input devices
   const getDevices = async () => {
@@ -24,7 +141,6 @@ export const useAudio = () => {
     try {
       // Check if permission was previously denied
       if (permissionDenied.value) {
-        // Create mock devices instead of requesting permission again
         devices.value = [{
           deviceId: 'default',
           label: 'Default Microphone (Permission Denied)',
@@ -123,7 +239,7 @@ export const useAudio = () => {
       // If permission was denied, create a silent audio stream
       if (permissionDenied.value) {
         // Create a silent audio context as a fallback
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const ctx = await initAudioContext();
         const oscillator = ctx.createOscillator();
         const streamDestination = ctx.createMediaStreamDestination();
         oscillator.connect(streamDestination);
@@ -170,7 +286,7 @@ export const useAudio = () => {
         permissionDenied.value = true;
         
         // Create a silent audio context as a fallback
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const ctx = await initAudioContext();
         const oscillator = ctx.createOscillator();
         const destination = ctx.createMediaStreamDestination();
         oscillator.connect(destination);
@@ -221,20 +337,18 @@ export const useAudio = () => {
     
     try {
       // Create audio context if it doesn't exist
-      if (!audioContext.value) {
-        audioContext.value = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      
-      // Create analyser node
-      analyser.value = audioContext.value.createAnalyser();
-      analyser.value.fftSize = 256;
-      
-      // Connect stream to analyser
-      const source = audioContext.value.createMediaStreamSource(stream.value);
-      source.connect(analyser.value);
-      
-      // Start analyzing volume
-      analyzeVolume();
+      initAudioContext().then(ctx => {
+        // Create analyser node
+        analyser.value = ctx.createAnalyser();
+        analyser.value.fftSize = 256;
+        
+        // Connect stream to analyser
+        const source = ctx.createMediaStreamSource(stream.value!);
+        source.connect(analyser.value);
+        
+        // Start analyzing volume
+        analyzeVolume();
+      });
     } catch (err) {
       console.error('Error setting up audio analysis:', err);
     }
@@ -274,9 +388,7 @@ export const useAudio = () => {
       stream.value = null;
     }
     
-    if (audioContext.value) {
-      audioContext.value.close();
-      audioContext.value = null;
+    if (analyser.value) {
       analyser.value = null;
     }
     
@@ -333,17 +445,17 @@ export const useAudio = () => {
     }
   };
 
-  // Funktion explizit zum Anfordern der Mikrofonberechtigung hinzufügen
+  // Request microphone permission
   const requestMicrophonePermission = async (): Promise<boolean> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Wenn erfolgreich, Stream wieder freigeben
+      // If successful, release stream
       stream.getTracks().forEach(track => track.stop());
       
       permissionDenied.value = false;
       
-      // Nach erfolgreicher Berechtigung die Geräte neu laden
+      // After successful permission, reload devices
       await getDevices();
       
       return true;
@@ -372,6 +484,7 @@ export const useAudio = () => {
   onUnmounted(() => {
     if (process.client) {
       stopStream();
+      cleanupAudio();
       
       // Remove event listener
       if (navigator.mediaDevices && navigator.mediaDevices.removeEventListener) {
@@ -390,6 +503,8 @@ export const useAudio = () => {
     error,
     volumeLevel,
     permissionDenied,
+    audioContext,
+    gainNodes,
     getDevices,
     selectDevice,
     selectSpeaker,
@@ -397,5 +512,12 @@ export const useAudio = () => {
     loadPreferredDevices,
     savePreferredDevices,
     requestMicrophonePermission,
+    initAudioContext,
+    createGainNode,
+    getGainNode,
+    setGroupVolume,
+    processAudioForGroup,
+    cleanupGroupAudio,
+    cleanupAudio
   };
 };

@@ -5,7 +5,7 @@ export default defineNuxtConfig({
   modules: [
     '@pinia/nuxt',
     '@nuxtjs/tailwindcss',
-    'nuxt-icon',
+    '@nuxt/icon',
   ],
   runtimeConfig: {
     // Server-side environment variables
