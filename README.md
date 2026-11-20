@@ -1,6 +1,6 @@
 > [!WARNING]
 > **This repository is archived.** It is no longer maintained or developed.
-> Use [talktome](https://github.com/LeeO86/talktome) instead.
+> Use [talktome](https://github.com/thepoison606/talktome) instead.
 
 # Broadcast Intercom System
 
