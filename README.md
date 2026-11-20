@@ -1,3 +1,7 @@
+> [!WARNING]
+> **This repository is archived.** It is no longer maintained or developed.
+> Use [talktome](https://github.com/LeeO86/talktome) instead.
+
 # Broadcast Intercom System
 
 A professional-grade intercom system for broadcast productions built with Nuxt 3. This application provides real-time audio communication between production team members with features like push-to-talk, program sound distribution, and group management.
